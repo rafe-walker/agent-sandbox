@@ -66,6 +66,7 @@ export {
   Gateway,
   gatewayFromEnv,
   makeProxyDispatch,
+  totalTokens,
   DEFAULT_UPSTREAM,
   DEFAULT_ALLOWED_PATHS,
   DEFAULT_BUDGET,
