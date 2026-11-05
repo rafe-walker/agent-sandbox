@@ -51,4 +51,13 @@ export {
   type Rlimits,
 } from './launcher.js';
 export { launcherProbes, canLaunch, selfTestWorker } from './launcher-probes.js';
+export {
+  setupNetwork,
+  teardownNetwork,
+  cleanupStale,
+  NET_PREFIX,
+  type NetHandle,
+  type SetupOptions,
+} from './net.js';
+export { netEnforcedProbe, canEnforceNet } from './net-probes.js';
 export { assembleCapabilityProbes, type AssembleOptions } from './probes.js';

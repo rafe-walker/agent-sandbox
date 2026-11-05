@@ -7,6 +7,16 @@ semantic versioning once past 0.x.
 ## [Unreleased]
 
 ### Added
+- The per-attempt network cage. A dedicated netns joined by a veth pair; the
+  launcher runs the sandbox under `ip netns exec` so it inherits the cage. Host
+  nftables live in our OWN `inet asbx_<id>` table (the host's existing ruleset
+  is never touched) and allow the sandbox to reach only the configured gateway
+  TCP ports on the host veth IP — no DNS, IPv6 disabled and dropped, no
+  forwarding (`ip_forward` stays off). `setupNetwork`/`teardownNetwork` are
+  idempotent; `cleanupStale` removes every leftover `asbx_` netns/table/veth
+  from crashed runs. The `net_enforced` probe measures reachability (gateway
+  yes; non-gateway port, external host, DNS, IPv6 all no) and feeds the
+  preflight.
 - The launcher. Runs an untrusted command through
   `prlimit -> setpriv -> [ip netns exec] -> bwrap`: a dedicated per-worker uid
   with a PRIVATE group (never a shared gid such as `docker`); user/pid/ipc/uts
