@@ -8,7 +8,7 @@ import { coreAttacks } from './attacks/index.js';
 import { canLaunch } from './launcher-probes.js';
 import type { NetHandle } from './net.js';
 
-const COMMANDS = ['preflight', 'run', 'gateway', 'collector', 'submit', 'cleanup'] as const;
+const COMMANDS = ['preflight', 'pubkey', 'run', 'gateway', 'collector', 'submit', 'cleanup'] as const;
 
 function usage(): void {
   process.stderr.write(
@@ -17,7 +17,11 @@ function usage(): void {
       '',
       'Usage:',
       '  agent-sandbox preflight [--profile <dev|linux-sandbox>] [--json]',
-      '                                 Probe capabilities + run the attacker suite',
+      '                    [--sign --out <file> [--key-dir <d>] [--ttl-ms <n>]]',
+      '                                 Probe capabilities + run the attacker suite;',
+      '                                 --sign writes an Ed25519-signed report (root only)',
+      '  agent-sandbox pubkey [--key-dir <d>]',
+      '                                 Print the host preflight public key (PEM)',
       '  agent-sandbox run [--profile linux-sandbox|dev] [--source <dir>] [--wall-ms <n>]',
       '                    [--gateway-port <p>] [--env K=V ...] [--inherit-env (dev only)] -- <cmd...>',
       '                                 Launch a command inside the sandbox',
@@ -59,6 +63,26 @@ async function cmdPreflight(argv: string[]): Promise<number> {
     attacks: canLaunch() ? coreAttacks() : [],
   });
 
+  if (argv.includes('--sign')) {
+    const out = parseFlag(argv, '--out');
+    if (!out) {
+      process.stderr.write('--sign requires --out <file>\n');
+      return 2;
+    }
+    const { loadOrCreateHostKey, signPreflight } = await import('./attest.js');
+    const keyDir = parseFlag(argv, '--key-dir');
+    const ttlMs = intFlag(argv, '--ttl-ms');
+    const key = await loadOrCreateHostKey({
+      ...(keyDir ? { dir: keyDir } : {}),
+      ...(sourceArg ? { forbidUnder: [sourceArg] } : {}),
+    });
+    const signed = signPreflight(report, key, ttlMs !== undefined ? { ttlMs } : {});
+    const { writeFile, rename } = await import('node:fs/promises');
+    const tmp = `${out}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify(signed) + '\n', { mode: 0o644, flag: 'wx' });
+    await rename(tmp, out);
+    process.stderr.write(`signed preflight written to ${out} (key ${key.keyId.slice(0, 16)})\n`);
+  }
   if (json) {
     process.stdout.write(JSON.stringify({ prereqs, report }, null, 2) + '\n');
   } else {
@@ -69,6 +93,12 @@ async function cmdPreflight(argv: string[]): Promise<number> {
     process.stdout.write('\n' + formatReport(report) + '\n');
   }
   return report.publishable ? 0 : 1;
+}
+
+async function cmdPubkey(argv: string[]): Promise<number> {
+  const { loadHostPublicKey, DEFAULT_KEY_DIR } = await import('./attest.js');
+  process.stdout.write(await loadHostPublicKey(parseFlag(argv, '--key-dir') ?? DEFAULT_KEY_DIR));
+  return 0;
 }
 
 async function cmdCollector(argv: string[]): Promise<number> {
@@ -273,6 +303,8 @@ async function main(): Promise<number> {
   switch (cmd) {
     case 'preflight':
       return cmdPreflight(rest);
+    case 'pubkey':
+      return cmdPubkey(rest);
     case 'run':
       return cmdRun(rest);
     case 'gateway':

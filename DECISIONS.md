@@ -111,3 +111,23 @@ imports `node:child_process` without `MINIMAL_ENV`.
 **Consequences**: The preflight measures exactly what real runs get. Helpers
 never inherit `process.env`. The capability probe and a dedicated attack scan
 every visible process, not only themselves.
+
+## 2026-11-05 — Preflight reports are Ed25519-signed per host
+
+**Context**: mcp-audit and mcp-bench accepted a preflight report on its
+contents alone, so a hand-written or edited JSON file passed as "linux-sandbox".
+**Decision**: The preflight signs `{report, binding}` with a per-host Ed25519
+key; the signature covers the exact payload bytes (base64 in the envelope, no
+canonicalization) with a domain-separation prefix. The binding holds the host
+id (sha256 of machine-id, boot_id, hostname, kernel release), the
+agent-sandbox and suite versions, the key id, issue/expiry times and a nonce.
+`verifyPreflight` fails closed and re-derives publishability.
+**Rationale**: Ed25519 lets consumers verify with only the public key, so a
+consumer process never holds signing material. Binding to boot_id makes a
+reboot (possibly into another kernel) invalidate every report.
+**Alternatives considered**: HMAC with a shared key (every verifier could
+forge); signing canonical JSON (a second canonicalizer to keep in sync).
+**Consequences**: The key is only as safe as root on the host. A consumer
+must obtain the public key out of band or from the root-owned key dir
+(`loadHostPublicKey`). Reports from before a reboot or upgrade must be
+re-issued.

@@ -6,6 +6,21 @@ semantic versioning once past 0.x.
 
 ## [Unreleased]
 
+### Added
+- **Signed preflight reports.** `agent-sandbox preflight --sign --out FILE`
+  signs the capability report with a per-host Ed25519 key (private half
+  0600 root in `/var/lib/agent-sandbox/attest/`, refused under any
+  sandbox-visible path or a non-root/writable ancestor). The signed report is
+  bound to the host (machine id, boot id, hostname, kernel), the
+  agent-sandbox version and the suite version, and expires after 1 h by
+  default (`--ttl-ms`, hard cap 6 h). `verifyPreflight(signed, pubkey)`
+  checks the signature over the exact payload bytes, the bindings and the
+  window, and re-derives `publishable` and the suite totals instead of
+  trusting the report's own flags. `agent-sandbox pubkey` prints the public
+  key; `loadHostPublicKey()` reads it with ownership checks.
+- `prepare` script, so `npm install github:rafe-walker/agent-sandbox#<sha>`
+  builds `dist/`.
+
 ### Security
 - **CRITICAL: harness credentials leaked through `/proc/1/environ`.** The
   launch chain (prlimit → setpriv → bwrap) was spawned with the harness env.
