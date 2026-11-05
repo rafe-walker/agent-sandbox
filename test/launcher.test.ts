@@ -129,3 +129,77 @@ describe.skipIf(!run)('launcher capability probes', () => {
     }
   });
 });
+
+describe.skipIf(!run)('harness env never reaches ANY process in the sandbox', () => {
+  it('no planted harness canary in any visible /proc/*/environ, cmdline or fd (incl. pid 1)', async () => {
+    const { credScanScript, parseCredScan } = await import('../src/launcher-probes.js');
+    const canary = 'asbx-harness-canary-' + Math.random().toString(36).slice(2);
+    const prev = process.env.ASBX_HARNESS_CANARY;
+    process.env.ASBX_HARNESS_CANARY = canary;
+    try {
+      const r = await runInSandbox(credScanScript(canary));
+      const scan = parseCredScan(r.stdout ?? '');
+      expect(scan, r.stdout).toBeDefined();
+      expect(scan!.procs).toBeGreaterThan(0);
+      expect(scan!.where).toBe('pid1=0 environ=0 cmdline=0 fd=0');
+    } finally {
+      if (prev === undefined) delete process.env.ASBX_HARNESS_CANARY;
+      else process.env.ASBX_HARNESS_CANARY = prev;
+    }
+  });
+});
+
+describe.skipIf(!run)('synthetic /etc (no host DNS/config leaks)', () => {
+  it('has passwd/group/nsswitch/hosts but no resolv.conf, shadow, or other host files', async () => {
+    const r = await runInSandbox(
+      [
+        'for f in resolv.conf shadow hostname machine-id gshadow sudoers; do test -e /etc/$f && echo "LEAK:$f"; done',
+        'for f in passwd group nsswitch.conf hosts; do test -e /etc/$f || echo "MISSING:$f"; done',
+        'echo user=$(id -un)',
+      ].join('\n'),
+    );
+    const out = r.stdout ?? '';
+    expect(out).not.toMatch(/LEAK:/);
+    expect(out).not.toMatch(/MISSING:/);
+    expect(out).toMatch(/user=asbx_w[0-9a-f]+/);
+  });
+});
+
+describe('shared invocation: production env is minimal (no caps needed)', () => {
+  it('the spawn env for a production launch is exactly MINIMAL_ENV, with --clearenv', async () => {
+    const { buildSandboxInvocation, MINIMAL_ENV } = await import('../src/launcher.js');
+    process.env.ASBX_HARNESS_CANARY = 'asbx-harness-canary-static';
+    try {
+      const inv = buildSandboxInvocation({ worker: { name: 'asbx_wtest', uid: 60000, gid: 60000 }, command: ['/bin/true'] }, '/tmp/x');
+      expect(inv.env).toEqual({ ...MINIMAL_ENV });
+      expect(JSON.stringify(inv)).not.toContain('asbx-harness-canary-static');
+      expect(inv.args).toContain('--clearenv');
+    } finally {
+      delete process.env.ASBX_HARNESS_CANARY;
+    }
+  });
+});
+
+describe.skipIf(!run)('creds scan positive control', () => {
+  it('the all-process scan DOES see the canary when env cleaning is disabled', async () => {
+    const { launchWith, allocateWorker: alloc } = await import('../src/launcher.js');
+    const { credScanScript, parseCredScan } = await import('../src/launcher-probes.js');
+    const canary = 'asbx-harness-canary-' + Math.random().toString(36).slice(2);
+    process.env.ASBX_HARNESS_CANARY = canary;
+    try {
+      const w = await alloc();
+      const r = await launchWith(
+        { worker: w, command: ['/bin/sh', '-c', credScanScript(canary)] },
+        { envClean: false },
+        { capture: true },
+      );
+      const scan = parseCredScan(r.stdout ?? '');
+      // The hit must come from environ (pid 1 included), not a self-match.
+      expect(scan?.environ).toBeGreaterThan(0);
+      expect(scan?.pid1).toBeGreaterThan(0);
+      expect(scan?.cmdline).toBe(0);
+    } finally {
+      delete process.env.ASBX_HARNESS_CANARY;
+    }
+  });
+});

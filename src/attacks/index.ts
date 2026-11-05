@@ -1,5 +1,5 @@
 /**
- * The core attacker suite: 25 attacks, each with a positive control.
+ * The core attacker suite: 26 attacks, each with a positive control.
  *
  * For every attack `run()` returns an AttackResult where:
  *   - `blocked` is true when the attack is stopped under the REAL config,
@@ -21,11 +21,17 @@ import { runLowLevel, withWorker, mkResult } from './harness.js';
 import { setupNetwork, teardownNetwork } from '../net.js';
 import { createAttemptCollector, readStore } from '../collector.js';
 import { buildRedactor } from '../redact.js';
+import { credScanScript, parseCredScan } from '../launcher-probes.js';
 import { allocateWorker, releaseWorker, launch } from '../launcher.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { MINIMAL_ENV } from '../launcher.js';
 
-const pExecFile = promisify(execFile);
+const pExecFileRaw = promisify(execFile);
+// Never inherit the harness env (credentials, proxy URLs) in a helper.
+function pExecFile(cmd: string, args: string[], opts: { timeout?: number } = {}): Promise<{ stdout: string; stderr: string }> {
+  return pExecFileRaw(cmd, args, { ...opts, env: { ...MINIMAL_ENV } });
+}
 const CANARY = 'sk-ant-CANARY-attacker-suite-0123456789abcdef';
 
 // ---------------------------------------------------------------------------
@@ -297,18 +303,34 @@ const gatewayConnect: Attack = {
 // ---------------------------------------------------------------------------
 // Credentials in env / /proc / fds. Real = clearenv + no fd; control = leak.
 // ---------------------------------------------------------------------------
+/** Plant CANARY in the harness env for the duration of fn. */
+async function withHarnessCanary<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.ASBX_CRED_CANARY;
+  process.env.ASBX_CRED_CANARY = CANARY;
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.ASBX_CRED_CANARY;
+    else process.env.ASBX_CRED_CANARY = prev;
+  }
+}
+
 const credEnv: Attack = {
   id: 'cred-env',
   title: 'read the model credential from the environment',
   async run(): Promise<AttackResult> {
-    const script = `env | grep -q "${CANARY}" && echo FOUND || echo absent`;
-    const real = await withWorker((w) => runLowLevel({ worker: w, script }));
-    const blocked = /absent/.test(real.stdout);
-    const control = await withWorker((w) =>
-      runLowLevel({ worker: w, script, drop: 'clearenv', inheritEnv: true, env: { ASBX_CRED_CANARY: CANARY } }),
-    );
-    const controlSucceeded = /FOUND/.test(control.stdout);
-    return mkResult('cred-env', credEnv.title, blocked, controlSucceeded, `real:${real.stdout.trim()} control:${control.stdout.trim()}`);
+    // The credential lives in the HARNESS env (the real threat). Real run:
+    // the chain's env is cleaned. Control: env cleaning disabled.
+    return withHarnessCanary(async () => {
+      const script = `env | grep -q "${CANARY}" && echo FOUND || echo absent`;
+      const real = await withWorker((w) => runLowLevel({ worker: w, script }));
+      const blocked = /absent/.test(real.stdout);
+      const control = await withWorker((w) =>
+        runLowLevel({ worker: w, script, drop: 'clearenv' }),
+      );
+      const controlSucceeded = /FOUND/.test(control.stdout);
+      return mkResult('cred-env', credEnv.title, blocked, controlSucceeded, `real:${real.stdout.trim()} control:${control.stdout.trim()}`);
+    });
   },
 };
 
@@ -316,16 +338,40 @@ const credProc: Attack = {
   id: 'cred-proc',
   title: 'read the model credential from /proc/self/environ',
   async run(): Promise<AttackResult> {
-    // `cat` opens environ AFTER exec; a shell redirect (`tr < /proc/self/environ`)
-    // opens it pre-exec, and the kernel then returns EOF — a vacuous check.
-    const script = `cat /proc/self/environ 2>/dev/null | tr '\\0' '\\n' | grep -q "${CANARY}" && echo FOUND || echo absent`;
-    const real = await withWorker((w) => runLowLevel({ worker: w, script }));
-    const blocked = /absent/.test(real.stdout);
-    const control = await withWorker((w) =>
-      runLowLevel({ worker: w, script, drop: 'clearenv', inheritEnv: true, env: { ASBX_CRED_CANARY: CANARY } }),
-    );
-    const controlSucceeded = /FOUND/.test(control.stdout);
-    return mkResult('cred-proc', credProc.title, blocked, controlSucceeded, `real:${real.stdout.trim()} control:${control.stdout.trim()}`);
+    // The credential lives in the HARNESS env (the real threat). Real run:
+    // the chain's env is cleaned. Control: env cleaning disabled.
+    return withHarnessCanary(async () => {
+      // `cat` opens environ AFTER exec; a shell redirect (`tr < /proc/self/environ`)
+      // opens it pre-exec, and the kernel then returns EOF — a vacuous check.
+      const script = `cat /proc/self/environ 2>/dev/null | tr '\\0' '\\n' | grep -q "${CANARY}" && echo FOUND || echo absent`;
+      const real = await withWorker((w) => runLowLevel({ worker: w, script }));
+      const blocked = /absent/.test(real.stdout);
+      const control = await withWorker((w) =>
+        runLowLevel({ worker: w, script, drop: 'clearenv' }),
+      );
+      const controlSucceeded = /FOUND/.test(control.stdout);
+      return mkResult('cred-proc', credProc.title, blocked, controlSucceeded, `real:${real.stdout.trim()} control:${control.stdout.trim()}`);
+    });
+  },
+};
+
+const procPid1Environ: Attack = {
+  id: 'proc-pid1-environ',
+  title: 'read harness creds from /proc/1/environ (bwrap) or any visible process',
+  async run(): Promise<AttackResult> {
+    // bwrap is pid 1 in the agent's PID namespace and runs as the worker uid;
+    // its environ is whatever the harness spawned the chain with. Scan pid 1
+    // and every other visible process (environ, cmdline, fds).
+    return withHarnessCanary(async () => {
+      const script = credScanScript(CANARY);
+      const real = await withWorker((w) => runLowLevel({ worker: w, script }));
+      const r = parseCredScan(real.stdout);
+      const blocked = r !== undefined && r.total === 0;
+      const control = await withWorker((w) => runLowLevel({ worker: w, script, drop: 'clearenv' }));
+      const c = parseCredScan(control.stdout);
+      const controlSucceeded = c !== undefined && c.pid1 > 0;
+      return mkResult('proc-pid1-environ', procPid1Environ.title, blocked, controlSucceeded, `real:${r?.where ?? 'no-scan'} control:${c?.where ?? 'no-scan'}`);
+    });
   },
 };
 
@@ -482,7 +528,7 @@ const symlinkEscape: Attack = {
   },
 };
 
-/** The full 25-attack suite, in a stable order. */
+/** The full 26-attack suite, in a stable order. */
 export function coreAttacks(): Attack[] {
   return [
     // filesystem (5)
@@ -503,9 +549,10 @@ export function coreAttacks(): Attack[] {
     netDns,
     netMetadata,
     gatewayConnect,
-    // credentials (3)
+    // credentials (4)
     credEnv,
     credProc,
+    procPid1Environ,
     credFd,
     // reflected canary (4)
     canaryPlain,
@@ -519,4 +566,4 @@ export function coreAttacks(): Attack[] {
   ];
 }
 
-export const SUITE_SIZE = 25;
+export const SUITE_SIZE = 26;

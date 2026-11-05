@@ -6,6 +6,30 @@ semantic versioning once past 0.x.
 
 ## [Unreleased]
 
+### Security
+- **CRITICAL: harness credentials leaked through `/proc/1/environ`.** The
+  launch chain (prlimit → setpriv → bwrap) was spawned with the harness env.
+  `--clearenv` only cleaned bwrap's *child*; bwrap is pid 1 in the agent's PID
+  namespace, runs as the worker uid, and kept the full harness env (e.g.
+  `GITHUB_TOKEN`, the model key, proxy URLs), readable by any agent process.
+  The chain and every helper now run with `MINIMAL_ENV` (PATH only).
+  Preflight said PUBLISHABLE because the attacker suite had its own launcher
+  that differed from production. Both now go through ONE path
+  (`buildSandboxInvocation` + `launchWith`), guarded by tests that fail if
+  they ever diverge or if any spawn site skips `MINIMAL_ENV`. The
+  `creds_absent` probe now scans every visible process (environ, cmdline,
+  fds). A new `proc-pid1-environ` attack, with a positive control, covers
+  this. Any credential present in a harness env that launched a sandbox
+  before this fix should be treated as exposed to that sandbox's agent.
+- The host `/etc` (resolv.conf, hostname, shadow, ...) is no longer
+  bind-mounted. Sandboxes get a synthetic `/etc` (passwd, group, nsswitch,
+  hosts with an optional `gateway` entry) plus only the CA bundle, loader
+  cache and alternatives symlinks.
+- Streamed (SSE) gateway response bodies are now redacted, with a sliding
+  window across chunk boundaries.
+- Cage subnets are allocated atomically under a cross-process lock; prefix-
+  derived subnets collided under concurrency.
+
 ### Added
 - `agent-sandbox run` (linux-sandbox or dev, optional network cage, env,
   wall clock) and `agent-sandbox gateway` (prints the attempt id, base URL and
@@ -13,13 +37,14 @@ semantic versioning once past 0.x.
   library API and a full harness composition. An end-to-end test runs a model
   call from inside the sandbox through the cage and the gateway on a session
   token only.
-- The core attacker suite: 25 attacks, each run under the real sandbox config
+- The core attacker suite: 26 attacks, each run under the real sandbox config
   AND under a positive control that disables exactly one protection (the
   control must succeed, or the attack fails). Filesystem (control file, setup
   state, call log, findings, symlink escape); /proc and ptrace against the
   harness; inherited fds; detached-process survival; direct egress, egress with
   HTTPS_PROXY unset, IPv6, DNS, the metadata IP; CONNECT through the gateway;
-  credentials via env, /proc and fds; reflected canary in plain, base64,
+  credentials via env, /proc/self/environ, /proc/1/environ (and every visible
+  process) and fds; reflected canary in plain, base64,
   URL-encoded and split forms; fork bomb, disk fill, SIGKILL mid-write. Runs in
   CI and in `agent-sandbox preflight`; results are recorded host-side.
 - An explicit `notApplicable` attack outcome, allowed only when the harness

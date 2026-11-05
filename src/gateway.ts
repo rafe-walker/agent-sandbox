@@ -269,10 +269,17 @@ export class Gateway {
 
       if (upstream.stream) {
         res.writeHead(upstream.status, outHeaders);
+        // Streamed bodies are redacted too, across chunk boundaries. The meter
+        // reads the raw provider chunk (usage numbers never contain the key).
+        const sr = this.redactor.stream();
+        const decoder = new TextDecoder('utf-8');
         for await (const chunk of upstream.stream) {
           this.meter(attempt, chunk);
-          res.write(chunk);
+          const safe = sr.push(decoder.decode(chunk, { stream: true }));
+          if (safe) res.write(safe);
         }
+        const rest = sr.push(decoder.decode()) + sr.flush();
+        if (rest) res.write(rest);
         res.end();
         return;
       }

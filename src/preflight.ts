@@ -10,6 +10,7 @@
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { MINIMAL_ENV } from './launcher.js';
 import {
   derivePublishable,
   foldSuite,
@@ -21,7 +22,11 @@ import {
 import { assertImplemented, type Profile } from './profiles.js';
 import { SUITE_VERSION } from './version.js';
 
-const pExecFile = promisify(execFile);
+const pExecFileRaw = promisify(execFile);
+// Never inherit the harness env (credentials, proxy URLs) in a helper.
+function pExecFile(cmd: string, args: string[], opts: { timeout?: number } = {}): Promise<{ stdout: string; stderr: string }> {
+  return pExecFileRaw(cmd, args, { ...opts, env: { ...MINIMAL_ENV } });
+}
 
 export interface CapabilityProbe {
   readonly name: CapabilityName;

@@ -43,7 +43,7 @@ preflight attacker suite passed on this host. There is no silent downgrade.
 | Piece | What it does |
 |---|---|
 | **Profiles** | `dev`, `linux-sandbox`, `microvm` (reserved). |
-| **Preflight** | Probes *measured* capabilities and runs the 25-test attacker suite, each with a positive control. Writes a host-side capability report. |
+| **Preflight** | Probes *measured* capabilities and runs the 26-test attacker suite, each with a positive control. Writes a host-side capability report. |
 | **Launcher** | Dedicated uid+gid per worker; bwrap with user/pid/ipc/net/uts namespaces, `--die-with-parent`, `--new-session`, `--cap-drop ALL`; read-only system + source; fresh HOME, private /tmp + /dev/shm, new /proc, minimal /dev, no /run; fd allowlist; rlimits; wall-clock kill; PID-namespace teardown with a survivor check. |
 | **Network** | Per-attempt netns + veth pair; host nftables that allow only the gateway ports; no DNS, no IPv6, no forwarding. Idempotent setup/teardown with crash cleanup. |
 | **Gateway** | Holds the real Anthropic key. Agent gets `ANTHROPIC_BASE_URL` + a random per-attempt session token. Path allowlist, CONNECT refused, arbitrary hosts refused, credential-bearing errors/headers stripped, per-attempt token/request/time budgets, provider-truth usage meter. Forwards through the outer HTTPS proxy. |

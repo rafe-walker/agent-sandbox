@@ -273,3 +273,31 @@ describe('gateway: budget validation (number tricks fail closed)', () => {
     expect((await request(g, { path: '/v1/messages', token: sessionToken, body: '{}' })).status).toBe(429);
   });
 });
+
+describe('gateway: streamed bodies are redacted (sliding window)', () => {
+  it('redacts the real key in SSE, including when split across chunk boundaries', async () => {
+    const half = Math.floor(REAL_KEY.length / 2);
+    const chunks = [
+      `event: content_block_delta\ndata: {"delta":{"text":"echo ${REAL_KEY} end"}}\n\n`,
+      `event: content_block_delta\ndata: {"delta":{"text":"split ${REAL_KEY.slice(0, half)}`,
+      `${REAL_KEY.slice(half)} tail"}}\n\n`,
+      `event: content_block_delta\ndata: {"delta":{"text":"b64 ${Buffer.from(REAL_KEY).toString('base64')}"}}\n\n`,
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ];
+    const up = fakeUpstream(() => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      stream: (async function* () {
+        for (const c of chunks) yield Buffer.from(c);
+      })(),
+    }));
+    const g = await startGateway(up.dispatch);
+    const { sessionToken } = g.registerAttempt();
+    const res = await request(g, { path: '/v1/messages', token: sessionToken, body: '{"stream":true}' });
+    expect(res.status).toBe(200);
+    expect(res.body).not.toContain(REAL_KEY);
+    expect(res.body).not.toContain(Buffer.from(REAL_KEY).toString('base64'));
+    expect(res.body.match(/\[REDACTED\]/g)?.length).toBe(3);
+    expect(res.body).toContain('message_stop'); // stream still delivered intact otherwise
+  });
+});
