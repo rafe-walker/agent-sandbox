@@ -7,6 +7,19 @@ semantic versioning once past 0.x.
 ## [Unreleased]
 
 ### Added
+- The trusted evidence collector. A per-attempt UNIX socket under a root-owned
+  dir; the agent submits versioned, schema-validated, size-bounded (64 KiB)
+  proposals and the collector assigns the id, timestamp, seq and attempt
+  identity itself, appending to a canonical store the agent cannot reach, and
+  returns a receipt. Caller identity is enforced by filesystem ownership (the
+  0600 socket is owned by the worker uid in a traverse-only 0711 `sock/` dir;
+  the store sits under a separate opaque 0700 dir, never bind-mounted) because
+  Node core cannot read SO_PEERCRED — same guarantee, see DECISIONS.md. Hostile
+  input (bad JSON, wrong schema, `__proto__`/`constructor` keys, oversize,
+  deep nesting, bad `kind`) fails closed. The `evidence_writer_separated` probe
+  measures all of this from inside the sandbox and feeds the preflight.
+- `sandbox-submit`, a tiny CLI (also `agent-sandbox submit`) for submitting a
+  proposal from inside the sandbox; `agent-sandbox collector` runs the server.
 - The model auth gateway. The real Anthropic key lives only here; the agent
   gets `ANTHROPIC_BASE_URL` + a random per-attempt session token, which the
   gateway swaps for the real key. It allowlists the API paths the pinned Claude

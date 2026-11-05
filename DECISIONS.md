@@ -42,3 +42,26 @@ ports from the veth iface; `ip_forward` stays off so the sandbox cannot route
 to the host's uplink; IPv6 and DNS denied.
 **Consequences**: Names like `asbx_<hex>` (underscores; nft rejects hyphens in
 unquoted identifiers, 15-char veth limit). Teardown removes netns, veth, table.
+
+## 2026-11-05 — Collector caller-identity: filesystem ownership, not SO_PEERCRED
+
+**Context**: The design calls for SO_PEERCRED to identify the caller uid on the
+collector socket. Node's core `net` exposes no `getsockopt`, so SO_PEERCRED
+cannot be read without a native addon (a new build dependency we do not want in
+v0.1).
+**Decision**: Enforce the same property with the filesystem: one socket per
+attempt, the socket owned by that attempt's worker uid at mode 0600, inside a
+root-owned 0711 (traverse-only) `sock/` dir; the canonical store lives under a
+separate root-owned 0700 `store/` dir and is never bind-mounted. Attempt
+identity is the socket the connection arrived on — never a field the agent
+sends.
+**Rationale**: Only the worker uid can open its 0600 socket; the agent cannot
+list, create in, or delete from the 0711 dir, and cannot traverse the 0700
+store dir at all. This yields the SO_PEERCRED guarantee (a wrong uid cannot
+connect; identity is not agent-supplied) in pure Node.
+**Alternatives**: a native SO_PEERCRED addon (rejected: build dep for v0.1);
+a single shared socket with in-band attempt ids (rejected: agent-forgeable).
+**Consequences**: bwrap resolves the bind source as the dropped worker uid, so
+the socket path must be traverse-reachable (0711); documented here and in the
+collector source. A native SO_PEERCRED check can be added later as
+defence-in-depth without changing the model.
