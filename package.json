@@ -1,0 +1,66 @@
+{
+  "name": "agent-sandbox",
+  "version": "0.1.0",
+  "description": "Linux isolation for untrusted AI agent processes: bubblewrap + dedicated uid, a netns/nftables egress cage, a model-auth gateway, a trusted evidence collector, and a 25-test attacker preflight with positive controls.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "agent-sandbox": "dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "CHANGELOG.md",
+    "SECURITY.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsup",
+    "pretest": "npm run build",
+    "test": "vitest run",
+    "lint": "eslint src test",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
+    "preflight": "node dist/cli.js preflight"
+  },
+  "keywords": [
+    "sandbox",
+    "isolation",
+    "bubblewrap",
+    "bwrap",
+    "namespaces",
+    "nftables",
+    "ai-agent",
+    "untrusted-code",
+    "mcp"
+  ],
+  "author": "Joshua Bryan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rafe-walker/agent-sandbox.git"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@types/node": "^22.19.0",
+    "eslint": "^9.39.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^3.2.4"
+  }
+}

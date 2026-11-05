@@ -1,0 +1,51 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-build-type:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+
+  # Linux sandbox suite. MUST NOT skip silently: if namespace support is
+  # missing the job fails closed.
+  sandbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install sandbox dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap iproute2 nftables
+      - name: Verify namespace support (fail closed)
+        run: |
+          set -e
+          if [ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 1)" = "0" ]; then
+            echo "::error::Unprivileged user namespaces are disabled on this runner. Failing closed."
+            exit 1
+          fi
+          # A real bwrap smoke so a broken runner fails here, not mid-suite.
+          bwrap --unshare-user --unshare-pid --unshare-net --dev /dev --proc /proc \
+            --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
+            --tmpfs /tmp -- /bin/true
+          echo "namespaces OK"
+      - run: npm ci
+      - name: Run full suite under sandbox (never AGENT_SANDBOX_SKIP)
+        env:
+          AGENT_SANDBOX_REQUIRE_CAPS: "1"
+        run: npm test
