@@ -33,3 +33,22 @@ export {
   type PreflightOptions,
   type Prereq,
 } from './preflight.js';
+export {
+  allocateWorker,
+  releaseWorker,
+  launch,
+  runInSandbox,
+  buildBwrapArgs,
+  fdAssertionScript,
+  makeReadableSource,
+  cleanupDir,
+  DEFAULT_RLIMITS,
+  WORKER_PREFIX,
+  type Worker,
+  type LaunchOptions,
+  type LaunchResult,
+  type Bind,
+  type Rlimits,
+} from './launcher.js';
+export { launcherProbes, canLaunch, selfTestWorker } from './launcher-probes.js';
+export { assembleCapabilityProbes, type AssembleOptions } from './probes.js';

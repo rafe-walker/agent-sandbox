@@ -3,6 +3,7 @@ import { SUITE_VERSION } from './version.js';
 import { isProfile, type Profile } from './profiles.js';
 import { formatReport } from './report.js';
 import { runPreflight, checkPrereqs } from './preflight.js';
+import { assembleCapabilityProbes } from './probes.js';
 
 const COMMANDS = ['preflight', 'run', 'gateway', 'collector'] as const;
 
@@ -37,10 +38,13 @@ async function cmdPreflight(argv: string[]): Promise<number> {
   const profile = profileArg as Profile;
 
   const prereqs = await checkPrereqs();
-  // v0.1: capability probes and the attacker suite are registered by the later
-  // stacked modules. This build runs the orchestrator with the sets available,
-  // which on a fresh checkout is empty -> non-publishable, honestly reported.
-  const report = await runPreflight({ profile });
+  const sourceArg = parseFlag(argv, '--source');
+  // The attacker suite is registered by the later stacked module; capability
+  // probes are assembled from whatever this host supports.
+  const report = await runPreflight({
+    profile,
+    capabilityProbes: assembleCapabilityProbes(sourceArg ? { sourceDir: sourceArg } : {}),
+  });
 
   if (json) {
     process.stdout.write(JSON.stringify({ prereqs, report }, null, 2) + '\n');
