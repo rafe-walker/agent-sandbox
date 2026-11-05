@@ -47,6 +47,15 @@ export interface Redactor {
   contains(text: string): boolean;
   /** The compiled needle count (for tests). */
   readonly needleCount: number;
+  /** Streaming form: redacts across chunk boundaries with a sliding window. */
+  stream(): StreamRedactor;
+}
+
+export interface StreamRedactor {
+  /** Feed a chunk; returns the text that is now safe to emit. */
+  push(chunk: string): string;
+  /** End of stream: returns the redacted remainder. */
+  flush(): string;
 }
 
 export function buildRedactor(secrets: Iterable<string>): Redactor {
@@ -77,5 +86,36 @@ export function buildRedactor(secrets: Iterable<string>): Redactor {
     },
   });
   Object.defineProperty(fn, 'needleCount', { value: ordered.length });
+
+  // Hold back maxLen-1 chars: any needle that starts before the cut then ends
+  // inside the buffered text, so it is either fully visible (and redacted) or
+  // still pending in the tail. Never cut inside a match.
+  const maxLen = ordered.reduce((m, n) => Math.max(m, n.length), 0);
+  Object.defineProperty(fn, 'stream', {
+    value: (): StreamRedactor => {
+      let tail = '';
+      return {
+        push(chunk: string): string {
+          if (re === null) return chunk;
+          const text = tail + chunk;
+          let cut = Math.max(0, text.length - (maxLen - 1));
+          re.lastIndex = 0;
+          for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+            const start = m.index;
+            const end = start + m[0].length;
+            if (start < cut && end > cut) cut = end; // complete match spans the cut
+            if (start >= cut) break;
+          }
+          tail = text.slice(cut);
+          return fn(text.slice(0, cut));
+        },
+        flush(): string {
+          const out = fn(tail);
+          tail = '';
+          return out;
+        },
+      };
+    },
+  });
   return fn;
 }

@@ -14,8 +14,15 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
+import { open, readFile, unlink, mkdir } from 'node:fs/promises';
+import path from 'node:path';
+import { MINIMAL_ENV } from './launcher.js';
 
-const pExecFile = promisify(execFile);
+const pExecFileRaw = promisify(execFile);
+// Helpers never inherit the harness env (credentials, proxy URLs).
+function pExecFile(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return pExecFileRaw(cmd, args, { env: { ...MINIMAL_ENV } });
+}
 
 export const NET_PREFIX = 'asbx_';
 
@@ -76,12 +83,83 @@ function names(id: string): Omit<NetHandle, 'hostIp' | 'sandboxIp' | 'gatewayPor
   };
 }
 
-/** Derive a per-attempt /30 so concurrent attempts never collide. */
-function subnet(id: string): { host: string; sandbox: string } {
-  const b = Buffer.from(id.padEnd(4, '0'));
-  const a = (b[0] ?? 0) % 254;
-  const c = b[1] ?? 0;
-  return { host: `10.${a}.${c}.1`, sandbox: `10.${a}.${c}.2` };
+/** Pool for cage /30s: 10.213.0.0/16 (16384 subnets). */
+const POOL_PREFIX = '10.213';
+export const NET_LOCK_PATH = '/run/agent-sandbox/net.lock';
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Cross-process exclusive lock (O_EXCL lock file holding the owner pid). A
+ * lock whose owner is dead (crash) is broken. Held only for allocate+assign.
+ */
+async function withNetLock<T>(fn: () => Promise<T>): Promise<T> {
+  await mkdir(path.dirname(NET_LOCK_PATH), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    try {
+      const fh = await open(NET_LOCK_PATH, 'wx', 0o600);
+      await fh.writeFile(String(process.pid));
+      await fh.close();
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      const owner = Number((await readFile(NET_LOCK_PATH, 'utf8').catch(() => '')).trim());
+      if (Number.isInteger(owner) && owner > 0 && !pidAlive(owner)) {
+        await unlink(NET_LOCK_PATH).catch(() => {});
+        continue;
+      }
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${NET_LOCK_PATH}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    await unlink(NET_LOCK_PATH).catch(() => {});
+  }
+}
+
+/** /30 bases (as "a.b.c.d" of the network address) already present on the host. */
+async function usedPoolSubnets(): Promise<Set<string>> {
+  const used = new Set<string>();
+  const add = (ip: string): void => {
+    const parts = ip.split('.').map(Number);
+    if (parts.length !== 4 || `${parts[0]}.${parts[1]}` !== POOL_PREFIX) return;
+    used.add(`${parts[0]}.${parts[1]}.${parts[2]}.${(parts[3]! >> 2) << 2}`);
+  };
+  const { stdout: addrs } = await pExecFile('ip', ['-o', '-4', 'addr', 'show']);
+  for (const m of addrs.matchAll(/inet (\d+\.\d+\.\d+\.\d+)/g)) add(m[1]!);
+  const { stdout: routes } = await pExecFile('ip', ['-o', '-4', 'route', 'show']);
+  for (const m of routes.matchAll(/^(\d+\.\d+\.\d+\.\d+)/gm)) add(m[1]!);
+  return used;
+}
+
+/**
+ * Atomically pick a free /30 and assign the host side to `vethHost`. The lock
+ * covers both steps, so two concurrent setups can never pick the same /30.
+ */
+async function allocateAndAssign(vethHost: string): Promise<{ host: string; sandbox: string }> {
+  return withNetLock(async () => {
+    const used = await usedPoolSubnets();
+    for (let idx = 0; idx < 16384; idx++) {
+      const base = `${POOL_PREFIX}.${idx >> 6}.${(idx & 63) * 4}`;
+      if (used.has(base)) continue;
+      const [a, b, c, d] = base.split('.').map(Number) as [number, number, number, number];
+      const host = `${a}.${b}.${c}.${d + 1}`;
+      const sandbox = `${a}.${b}.${c}.${d + 2}`;
+      await run('ip', ['addr', 'add', `${host}/30`, 'dev', vethHost]);
+      return { host, sandbox };
+    }
+    throw new Error('network cage subnet pool exhausted');
+  });
 }
 
 /** Remove any resources for this id. Idempotent; used by setup and teardown. */
@@ -105,13 +183,6 @@ export async function setupNetwork(opts: SetupOptions): Promise<NetHandle> {
     .slice(0, 8)
     .padEnd(8, '0');
   const n = names(id);
-  const { host, sandbox } = subnet(id);
-  const handle: NetHandle = {
-    ...n,
-    hostIp: host,
-    sandboxIp: sandbox,
-    gatewayPorts: [...opts.gatewayPorts],
-  };
 
   await destroy(n); // crash cleanup / idempotency
 
@@ -120,8 +191,9 @@ export async function setupNetwork(opts: SetupOptions): Promise<NetHandle> {
     await run('ip', ['link', 'add', n.vethHost, 'type', 'veth', 'peer', 'name', n.vethSandbox]);
     await run('ip', ['link', 'set', n.vethSandbox, 'netns', n.netns]);
 
-    // Host side
-    await run('ip', ['addr', 'add', `${host}/30`, 'dev', n.vethHost]);
+    // Host side: allocate a free /30 and assign it under the cross-process lock.
+    const { host, sandbox } = await allocateAndAssign(n.vethHost);
+    const handle: NetHandle = { ...n, hostIp: host, sandboxIp: sandbox, gatewayPorts: [...opts.gatewayPorts] };
     await run('ip', ['link', 'set', n.vethHost, 'up']);
 
     // Sandbox side: disable IPv6, bring up lo + veth, default route to host.

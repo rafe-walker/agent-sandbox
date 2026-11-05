@@ -81,28 +81,21 @@ export function launcherProbes(sourceDir?: string): CapabilityProbe[] {
     {
       name: 'creds_absent',
       async run(): Promise<CapabilityResult> {
-        // Positive-control style: plant a credential canary in the HARNESS env,
-        // then assert bwrap's --clearenv kept it out of the sandbox env and
-        // /proc/self/environ. This measures the real property (the credential
-        // lives outside the sandbox and must not cross) and is robust to the
-        // legitimate ANTHROPIC_BASE_URL / session token the gateway later sets.
+        // Plant a credential canary in the HARNESS env, then scan EVERY process
+        // the sandbox can see (pid 1 = bwrap included): environ, cmdline, and
+        // every readable fd target. Robust to the legitimate
+        // ANTHROPIC_BASE_URL / session token the gateway later sets.
         const canary = 'sk-ant-CANARY-' + Math.random().toString(36).slice(2);
         const prev = process.env.ASBX_CRED_CANARY;
         process.env.ASBX_CRED_CANARY = canary;
         try {
-          const r = await runInSandbox(
-            // cat opens environ after exec; a `<` redirect would read EOF.
-            'env; echo ---; cat /proc/self/environ 2>/dev/null | tr "\\0" "\\n"',
-            common,
-          );
-          const out = r.stdout ?? '';
-          if (out.includes(canary)) {
-            return { status: 'fail', detail: 'harness credential canary leaked into sandbox env' };
+          const r = await runInSandbox(credScanScript(canary), common);
+          const hits = parseCredScan(r.stdout ?? '');
+          if (hits === undefined) return { status: 'fail', detail: 'credential scan produced no result' };
+          if (hits.total > 0) {
+            return { status: 'fail', detail: `harness credential canary visible in sandbox (${hits.where})` };
           }
-          if (out.includes('ASBX_CRED_CANARY')) {
-            return { status: 'fail', detail: 'harness env var name leaked (env not cleared)' };
-          }
-          return { status: 'pass', detail: 'harness credential canary absent from sandbox' };
+          return { status: 'pass', detail: `harness canary absent from all ${hits.procs} visible processes (environ, cmdline, fds)` };
         } finally {
           if (prev === undefined) delete process.env.ASBX_CRED_CANARY;
           else process.env.ASBX_CRED_CANARY = prev;
@@ -121,4 +114,53 @@ export function canLaunch(): boolean {
 export async function selfTestWorker(): Promise<{ survivors: number }> {
   const w = await allocateWorker();
   return releaseWorker(w);
+}
+
+/**
+ * Shell script that counts occurrences of `canary` across every visible
+ * process: /proc/<pid>/environ, /proc/<pid>/cmdline, and each regular file an
+ * fd points at (first 1 MiB). It never puts the joined canary in any argv
+ * (that would make the scan match its own cmdline): the halves are joined
+ * into a pattern file read by `grep -F -f`, and that file is excluded from the
+ * fd scan. `cat` opens environ after exec (a `<` redirect reads EOF). Prints
+ * counts only, never contents:
+ *   CREDSCAN procs=<n> pid1=<n> environ=<n> cmdline=<n> fd=<n>
+ */
+export function credScanScript(canary: string): string {
+  const mid = Math.floor(canary.length / 2);
+  const pat = '/tmp/.asbx-credscan-pat';
+  return [
+    `printf '%s%s\\n' '${canary.slice(0, mid)}' '${canary.slice(mid)}' > ${pat}`,
+    `cnt() { cat "$1" 2>/dev/null | tr '\\0' '\\n' | grep -c -F -f ${pat}; }`,
+    'p1=$(cnt /proc/1/environ)',
+    'procs=0; e=0; c=0; f=0',
+    'for d in /proc/[0-9]*; do',
+    '  procs=$((procs+1))',
+    '  n=$(cnt "$d/environ"); e=$((e+n))',
+    '  n=$(cnt "$d/cmdline"); c=$((c+n))',
+    '  for fd in "$d"/fd/*; do',
+    '    t=$(readlink "$fd" 2>/dev/null) || continue',
+    `    case "$t" in /proc/*|${pat}) continue;; esac`,
+    `    if [ -f "$t" ]; then n=$(head -c 1048576 "$t" 2>/dev/null | grep -c -F -f ${pat}); f=$((f+n)); fi`,
+    '  done',
+    'done',
+    'echo "CREDSCAN procs=$procs pid1=$p1 environ=$e cmdline=$c fd=$f"',
+  ].join('\n');
+}
+
+export interface CredScan {
+  procs: number;
+  pid1: number;
+  environ: number;
+  cmdline: number;
+  fd: number;
+  total: number;
+  where: string;
+}
+
+export function parseCredScan(out: string): CredScan | undefined {
+  const m = /CREDSCAN procs=(\d+) pid1=(\d+) environ=(\d+) cmdline=(\d+) fd=(\d+)/.exec(out);
+  if (!m) return undefined;
+  const [procs, pid1, environ, cmdline, fd] = m.slice(1).map(Number) as [number, number, number, number, number];
+  return { procs, pid1, environ, cmdline, fd, total: environ + cmdline + fd, where: `pid1=${pid1} environ=${environ} cmdline=${cmdline} fd=${fd}` };
 }
