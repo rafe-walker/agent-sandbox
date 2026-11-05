@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { SUITE_VERSION } from './version.js';
+import { isProfile, type Profile } from './profiles.js';
+import { formatReport } from './report.js';
+import { runPreflight, checkPrereqs } from './preflight.js';
 
 const COMMANDS = ['preflight', 'run', 'gateway', 'collector'] as const;
-type Command = (typeof COMMANDS)[number];
 
 function usage(): void {
   process.stderr.write(
@@ -10,7 +12,8 @@ function usage(): void {
       `agent-sandbox ${SUITE_VERSION}`,
       '',
       'Usage:',
-      '  agent-sandbox preflight        Probe capabilities + run the attacker suite',
+      '  agent-sandbox preflight [--profile <dev|linux-sandbox>] [--json]',
+      '                                 Probe capabilities + run the attacker suite',
       '  agent-sandbox run -- <cmd>     Launch a command inside the sandbox',
       '  agent-sandbox gateway          Run the model auth gateway',
       '  agent-sandbox collector        Run the trusted evidence collector',
@@ -19,8 +22,40 @@ function usage(): void {
   );
 }
 
+function parseFlag(argv: string[], name: string): string | undefined {
+  const i = argv.indexOf(name);
+  return i >= 0 ? argv[i + 1] : undefined;
+}
+
+async function cmdPreflight(argv: string[]): Promise<number> {
+  const json = argv.includes('--json');
+  const profileArg = parseFlag(argv, '--profile') ?? 'linux-sandbox';
+  if (!isProfile(profileArg)) {
+    process.stderr.write(`invalid --profile: ${profileArg}\n`);
+    return 2;
+  }
+  const profile = profileArg as Profile;
+
+  const prereqs = await checkPrereqs();
+  // v0.1: capability probes and the attacker suite are registered by the later
+  // stacked modules. This build runs the orchestrator with the sets available,
+  // which on a fresh checkout is empty -> non-publishable, honestly reported.
+  const report = await runPreflight({ profile });
+
+  if (json) {
+    process.stdout.write(JSON.stringify({ prereqs, report }, null, 2) + '\n');
+  } else {
+    process.stdout.write('prerequisites:\n');
+    for (const p of prereqs) {
+      process.stdout.write(`  [${p.ok ? '+' : 'x'}] ${p.name} — ${p.detail}\n`);
+    }
+    process.stdout.write('\n' + formatReport(report) + '\n');
+  }
+  return report.publishable ? 0 : 1;
+}
+
 async function main(): Promise<number> {
-  const [, , cmd] = process.argv;
+  const [, , cmd, ...rest] = process.argv;
   if (!cmd || cmd === '-h' || cmd === '--help') {
     usage();
     return cmd ? 0 : 2;
@@ -30,9 +65,13 @@ async function main(): Promise<number> {
     usage();
     return 2;
   }
-  // Subcommands are wired in the following PRs.
-  process.stderr.write(`${cmd as Command}: not implemented in this build\n`);
-  return 1;
+  switch (cmd) {
+    case 'preflight':
+      return cmdPreflight(rest);
+    default:
+      process.stderr.write(`${cmd}: not implemented in this build\n`);
+      return 1;
+  }
 }
 
 main().then(
