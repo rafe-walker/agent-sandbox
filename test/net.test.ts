@@ -126,3 +126,50 @@ describe.skipIf(!run)('network cage (requires root)', () => {
     }
   });
 });
+
+describe.skipIf(!run)('concurrent cages get distinct subnets', () => {
+  it('4 concurrent setups: unique /30s, and each sandbox reaches only its OWN gateway', async () => {
+    const ids = ['ab000001', 'ab000002', 'ab000003', 'ab000004']; // same prefix
+    const port = 20660;
+    const handles = await Promise.all(ids.map((attemptId) => setupNetwork({ gatewayPorts: [port], attemptId })));
+    const servers: net.Server[] = [];
+    try {
+      expect(new Set(handles.map((h) => h.hostIp)).size).toBe(ids.length);
+      for (const [i, h] of handles.entries()) {
+        const srv = net.createServer((s) => {
+          s.on('error', () => {});
+          s.end(`gw-${i}\n`);
+        });
+        srv.on('error', () => {});
+        await new Promise<void>((r) => srv.listen(port, h.hostIp, () => r()));
+        servers.push(srv);
+      }
+      for (const [i, h] of handles.entries()) {
+        const r = await runInSandbox(
+          `python3 -I -c "import socket;s=socket.create_connection(('${h.hostIp}',${port}),timeout=3);print(s.recv(64).decode().strip())" 2>&1 || echo FAIL`,
+          { netns: h.netns },
+        );
+        expect(r.stdout?.trim()).toBe(`gw-${i}`);
+      }
+    } finally {
+      for (const s of servers) await new Promise<void>((r) => s.close(() => r()));
+      for (const h of handles) await teardownNetwork(h);
+    }
+  }, 60_000);
+});
+
+describe.skipIf(!run)('subnet lock crash recovery', () => {
+  it('a lock left by a dead process is broken, not waited on', async () => {
+    const { NET_LOCK_PATH } = await import('../src/net.js');
+    const { spawnSync } = await import('node:child_process');
+    const { writeFile, mkdir } = await import('node:fs/promises');
+    const path = await import('node:path');
+    const dead = spawnSync('/bin/true').pid!; // exited: its pid is not alive
+    await mkdir(path.dirname(NET_LOCK_PATH), { recursive: true });
+    await writeFile(NET_LOCK_PATH, String(dead), { flag: 'wx' });
+    const t = Date.now();
+    const h = await setupNetwork({ gatewayPorts: [20671] });
+    expect(Date.now() - t).toBeLessThan(10_000);
+    await teardownNetwork(h);
+  });
+});
