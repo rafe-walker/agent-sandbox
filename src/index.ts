@@ -75,4 +75,18 @@ export {
   type UpstreamRequest,
   type UpstreamResponse,
 } from './gateway.js';
+export {
+  Collector,
+  createAttemptCollector,
+  readStore,
+  submitProposal,
+  proposalSchema,
+  PROPOSAL_SCHEMA,
+  MAX_PROPOSAL_BYTES,
+  type Proposal,
+  type Receipt,
+  type Rejection,
+  type CollectorOptions,
+} from './collector.js';
+export { evidenceWriterProbe, canCollect } from './collector-probes.js';
 export { assembleCapabilityProbes, type AssembleOptions } from './probes.js';

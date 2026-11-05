@@ -5,7 +5,7 @@ import { formatReport } from './report.js';
 import { runPreflight, checkPrereqs } from './preflight.js';
 import { assembleCapabilityProbes } from './probes.js';
 
-const COMMANDS = ['preflight', 'run', 'gateway', 'collector'] as const;
+const COMMANDS = ['preflight', 'run', 'gateway', 'collector', 'submit'] as const;
 
 function usage(): void {
   process.stderr.write(
@@ -17,7 +17,10 @@ function usage(): void {
       '                                 Probe capabilities + run the attacker suite',
       '  agent-sandbox run -- <cmd>     Launch a command inside the sandbox',
       '  agent-sandbox gateway          Run the model auth gateway',
-      '  agent-sandbox collector        Run the trusted evidence collector',
+      '  agent-sandbox collector --run-dir <d> --attempt <id>',
+      '                                 Run the trusted evidence collector',
+      '  agent-sandbox submit --socket <s> --kind <k> [--data <json>]',
+      '                                 Submit a proposal (host-side helper)',
       '',
     ].join('\n'),
   );
@@ -58,6 +61,50 @@ async function cmdPreflight(argv: string[]): Promise<number> {
   return report.publishable ? 0 : 1;
 }
 
+async function cmdCollector(argv: string[]): Promise<number> {
+  const { createAttemptCollector } = await import('./collector.js');
+  const runDir = parseFlag(argv, '--run-dir');
+  const attempt = parseFlag(argv, '--attempt');
+  if (!runDir || !attempt) {
+    process.stderr.write('collector requires --run-dir and --attempt\n');
+    return 2;
+  }
+  const uidStr = parseFlag(argv, '--worker-uid');
+  const { socketPath, storePath } = await createAttemptCollector({
+    runDir,
+    attempt,
+    ...(uidStr ? { workerUid: Number(uidStr) } : {}),
+  });
+  process.stdout.write(`collector listening\n  socket: ${socketPath}\n  store:  ${storePath}\n`);
+  // Run until signalled.
+  await new Promise<void>((resolve) => {
+    process.on('SIGINT', resolve);
+    process.on('SIGTERM', resolve);
+  });
+  return 0;
+}
+
+async function cmdSubmit(argv: string[]): Promise<number> {
+  const { submitProposal } = await import('./collector.js');
+  const socket = parseFlag(argv, '--socket') ?? process.env.ASBX_COLLECTOR_SOCK;
+  const kind = parseFlag(argv, '--kind');
+  if (!socket || !kind) {
+    process.stderr.write('submit requires --socket (or $ASBX_COLLECTOR_SOCK) and --kind\n');
+    return 2;
+  }
+  const dataStr = parseFlag(argv, '--data') ?? '{}';
+  let data: unknown;
+  try {
+    data = JSON.parse(dataStr);
+  } catch {
+    process.stderr.write('--data is not valid JSON\n');
+    return 2;
+  }
+  const receipt = await submitProposal(socket, kind, data);
+  process.stdout.write(JSON.stringify(receipt) + '\n');
+  return receipt.ok ? 0 : 1;
+}
+
 async function main(): Promise<number> {
   const [, , cmd, ...rest] = process.argv;
   if (!cmd || cmd === '-h' || cmd === '--help') {
@@ -72,6 +119,10 @@ async function main(): Promise<number> {
   switch (cmd) {
     case 'preflight':
       return cmdPreflight(rest);
+    case 'collector':
+      return cmdCollector(rest);
+    case 'submit':
+      return cmdSubmit(rest);
     default:
       process.stderr.write(`${cmd}: not implemented in this build\n`);
       return 1;
