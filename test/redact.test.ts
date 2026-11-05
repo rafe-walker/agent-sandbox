@@ -46,3 +46,32 @@ describe('buildRedactor', () => {
     expect(r2.needleCount).toBe(0);
   });
 });
+
+describe('stream redactor', () => {
+  const r = buildRedactor([SECRET]);
+  const b64 = Buffer.from(SECRET).toString('base64');
+  const text = `a ${SECRET} b ${encodeURIComponent(SECRET)} c ${b64} d ${SECRET.slice(0, 12)} ${SECRET.slice(12)} e`;
+  const whole = r(text);
+
+  it('equals one-shot redaction for every 2-way split point', () => {
+    for (let i = 0; i <= text.length; i++) {
+      const s = r.stream();
+      const out = s.push(text.slice(0, i)) + s.push(text.slice(i)) + s.flush();
+      expect(out, `split at ${i}`).toBe(whole);
+    }
+  });
+
+  it('equals one-shot redaction when fed 1 char at a time', () => {
+    const s = r.stream();
+    let out = '';
+    for (const ch of text) out += s.push(ch);
+    out += s.flush();
+    expect(out).toBe(whole);
+    expect(out).not.toContain(SECRET);
+  });
+
+  it('passes text through unchanged when there are no secrets', () => {
+    const s = buildRedactor([]).stream();
+    expect(s.push('abc') + s.flush()).toBe('abc');
+  });
+});
