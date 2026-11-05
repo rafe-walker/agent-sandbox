@@ -7,6 +7,12 @@ semantic versioning once past 0.x.
 ## [Unreleased]
 
 ### Added
+- `agent-sandbox run` (linux-sandbox or dev, optional network cage, env,
+  wall clock) and `agent-sandbox gateway` (prints the attempt id, base URL and
+  session token as JSON; never the real key). `docs/API.md` documents the
+  library API and a full harness composition. An end-to-end test runs a model
+  call from inside the sandbox through the cage and the gateway on a session
+  token only.
 - The core attacker suite: 25 attacks, each run under the real sandbox config
   AND under a positive control that disables exactly one protection (the
   control must succeed, or the attack fails). Filesystem (control file, setup
@@ -105,6 +111,9 @@ semantic versioning once past 0.x.
 - Default `RLIMIT_AS` lowered to 1 GiB; vitest runs with a single worker.
 
 ### Fixed
+- Gateway budgets accepted NaN/Infinity/negatives. Because `requests >= NaN`
+  is always false, an unvalidated NaN meant an unlimited budget. Budgets (and
+  CLI integer flags) are now validated as non-negative safe integers.
 - The `/proc/self/environ` credential check was vacuous: a shell redirect
   opens environ before `exec`, after which the kernel returns EOF, so a leak
   could never be seen. Both the `cred-proc` attack and the `creds_absent`

@@ -6,6 +6,7 @@ import { runPreflight, checkPrereqs } from './preflight.js';
 import { assembleCapabilityProbes } from './probes.js';
 import { coreAttacks } from './attacks/index.js';
 import { canLaunch } from './launcher-probes.js';
+import type { NetHandle } from './net.js';
 
 const COMMANDS = ['preflight', 'run', 'gateway', 'collector', 'submit', 'cleanup'] as const;
 
@@ -17,8 +18,12 @@ function usage(): void {
       'Usage:',
       '  agent-sandbox preflight [--profile <dev|linux-sandbox>] [--json]',
       '                                 Probe capabilities + run the attacker suite',
-      '  agent-sandbox run -- <cmd>     Launch a command inside the sandbox',
-      '  agent-sandbox gateway          Run the model auth gateway',
+      '  agent-sandbox run [--profile linux-sandbox|dev] [--source <dir>] [--wall-ms <n>]',
+      '                    [--gateway-port <p>] [--env K=V ...] -- <cmd...>',
+      '                                 Launch a command inside the sandbox',
+      '  agent-sandbox gateway --listen <host:port> [--max-requests n] [--max-tokens n]',
+      '                    [--max-wall-ms n] [--ca <bundle>]',
+      '                                 Run the model auth gateway (key from $ANTHROPIC_API_KEY)',
       '  agent-sandbox collector --run-dir <d> --attempt <id>',
       '                                 Run the trusted evidence collector',
       '  agent-sandbox submit --socket <s> --kind <k> [--data <json>]',
@@ -110,6 +115,132 @@ async function cmdSubmit(argv: string[]): Promise<number> {
   return receipt.ok ? 0 : 1;
 }
 
+/** Parse a non-negative safe integer flag; rejects NaN/Infinity/1e400/negatives. */
+function intFlag(argv: string[], name: string): number | undefined {
+  const raw = parseFlag(argv, name);
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+    throw new Error(`${name} must be a non-negative integer, got "${raw}"`);
+  }
+  return Number(raw);
+}
+
+function multiFlag(argv: string[], name: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) if (argv[i] === name && argv[i + 1] !== undefined) out.push(argv[i + 1]!);
+  return out;
+}
+
+async function cmdRun(argv: string[]): Promise<number> {
+  const dd = argv.indexOf('--');
+  const opts = dd >= 0 ? argv.slice(0, dd) : argv;
+  const command = dd >= 0 ? argv.slice(dd + 1) : [];
+  if (command.length === 0) {
+    process.stderr.write('run requires a command after --\n');
+    return 2;
+  }
+  const profile = parseFlag(opts, '--profile') ?? 'linux-sandbox';
+  if (!isProfile(profile)) {
+    process.stderr.write(`invalid --profile: ${profile}\n`);
+    return 2;
+  }
+  const env: Record<string, string> = {};
+  for (const kv of multiFlag(opts, '--env')) {
+    const i = kv.indexOf('=');
+    if (i <= 0) {
+      process.stderr.write(`--env expects K=V, got "${kv}"\n`);
+      return 2;
+    }
+    env[kv.slice(0, i)] = kv.slice(i + 1);
+  }
+  const wallClockMs = intFlag(opts, '--wall-ms');
+
+  if (profile === 'dev') {
+    process.stderr.write(
+      'WARNING: profile "dev" runs the command with NO isolation. Never publishable.\n',
+    );
+    const { spawnSync } = await import('node:child_process');
+    const r = spawnSync(command[0]!, command.slice(1), {
+      stdio: 'inherit',
+      env: { ...process.env, ...env },
+      ...(wallClockMs !== undefined ? { timeout: wallClockMs } : {}),
+    });
+    return r.status ?? 1;
+  }
+  if (profile === 'microvm') {
+    process.stderr.write('profile "microvm" is reserved and not implemented\n');
+    return 2;
+  }
+
+  const { allocateWorker, launch } = await import('./launcher.js');
+  const gatewayPort = intFlag(opts, '--gateway-port');
+  const source = parseFlag(opts, '--source');
+  let handle: NetHandle | undefined;
+  if (gatewayPort !== undefined) {
+    const { setupNetwork } = await import('./net.js');
+    handle = await setupNetwork({ gatewayPorts: [gatewayPort] });
+    process.stderr.write(`network cage ${handle.netns}: gateway reachable at ${handle.hostIp}:${gatewayPort}\n`);
+  }
+  try {
+    const worker = await allocateWorker();
+    const r = await launch({
+      worker,
+      command,
+      env,
+      ...(source ? { sourceDir: source } : {}),
+      ...(wallClockMs !== undefined ? { wallClockMs } : {}),
+      ...(handle ? { netns: handle.netns } : {}),
+    });
+    if (r.timedOut) process.stderr.write('wall-clock limit reached; sandbox killed\n');
+    if (r.survivors !== 0) process.stderr.write(`WARNING: ${r.survivors} process(es) survived teardown\n`);
+    return r.exitCode ?? 1;
+  } finally {
+    if (handle) {
+      const { teardownNetwork } = await import('./net.js');
+      await teardownNetwork(handle);
+    }
+  }
+}
+
+async function cmdGateway(argv: string[]): Promise<number> {
+  const { gatewayFromEnv } = await import('./gateway.js');
+  const listen = parseFlag(argv, '--listen') ?? '127.0.0.1:0';
+  const m = /^(.+):(\d+)$/.exec(listen);
+  if (!m) {
+    process.stderr.write(`--listen expects host:port, got "${listen}"\n`);
+    return 2;
+  }
+  const ca = parseFlag(argv, '--ca') ?? process.env.NODE_EXTRA_CA_CERTS;
+  const proxy = process.env.HTTPS_PROXY ?? process.env.https_proxy;
+  const g = gatewayFromEnv({
+    listenHost: m[1]!,
+    listenPort: Number(m[2]),
+    ...(proxy ? { proxyUrl: proxy } : {}),
+    ...(ca ? { caBundlePath: ca } : {}),
+  });
+  await g.start();
+  const budget: Record<string, number> = {};
+  const req = intFlag(argv, '--max-requests');
+  const tok = intFlag(argv, '--max-tokens');
+  const wall = intFlag(argv, '--max-wall-ms');
+  if (req !== undefined) budget.maxRequests = req;
+  if (tok !== undefined) budget.maxTokens = tok;
+  if (wall !== undefined) budget.maxWallMs = wall;
+  const { attemptId, sessionToken } = g.registerAttempt(budget);
+  // The session token is a low-value per-attempt credential meant for the
+  // sandbox; the real key is never printed.
+  process.stdout.write(
+    JSON.stringify({ attemptId, ANTHROPIC_BASE_URL: `http://${m[1]}:${g.port}`, ANTHROPIC_API_KEY: sessionToken }) + '\n',
+  );
+  await new Promise<void>((resolve) => {
+    process.on('SIGINT', resolve);
+    process.on('SIGTERM', resolve);
+  });
+  process.stderr.write(`usage ${JSON.stringify(g.usage(attemptId))}\n`);
+  await g.stop();
+  return 0;
+}
+
 async function cmdCleanup(): Promise<number> {
   const { cleanupStaleWorkers } = await import('./launcher.js');
   const { cleanupStale } = await import('./net.js');
@@ -133,6 +264,10 @@ async function main(): Promise<number> {
   switch (cmd) {
     case 'preflight':
       return cmdPreflight(rest);
+    case 'run':
+      return cmdRun(rest);
+    case 'gateway':
+      return cmdGateway(rest);
     case 'collector':
       return cmdCollector(rest);
     case 'submit':
