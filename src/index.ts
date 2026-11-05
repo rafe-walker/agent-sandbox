@@ -1,7 +1,35 @@
 /**
  * agent-sandbox — public library API.
- *
- * v0.1 exposes the suite version; the profile, preflight, launcher, network,
- * gateway and collector APIs land in the following stacked PRs.
  */
 export { SUITE_VERSION } from './version.js';
+export {
+  PROFILES,
+  IMPLEMENTED_PROFILES,
+  PUBLISHABLE_PROFILE,
+  isProfile,
+  assertImplemented,
+  type Profile,
+} from './profiles.js';
+export {
+  CAPABILITY_NAMES,
+  REQUIRED_CAPABILITIES,
+  capabilityReportSchema,
+  derivePublishable,
+  foldSuite,
+  formatReport,
+  type CapabilityName,
+  type CapabilityResult,
+  type AttackResult,
+  type SuiteResult,
+  type CapabilityReport,
+  type ProbeStatus,
+} from './report.js';
+export {
+  runPreflight,
+  checkPrereqs,
+  hostInfo,
+  type CapabilityProbe,
+  type Attack,
+  type PreflightOptions,
+  type Prereq,
+} from './preflight.js';
