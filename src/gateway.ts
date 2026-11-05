@@ -1,0 +1,416 @@
+/**
+ * The model auth gateway.
+ *
+ * The real Anthropic key lives ONLY here. The agent is pointed at this server
+ * with `ANTHROPIC_BASE_URL` and a random per-attempt session token; the gateway
+ * swaps the session token for the real key, forwards to the pinned upstream
+ * through the outer HTTPS proxy, and streams the response back. It:
+ *   - allowlists the API paths the pinned Claude Code version uses,
+ *   - refuses CONNECT and any non-allowlisted path,
+ *   - never forwards to an arbitrary host (upstream host is fixed),
+ *   - strips credential-bearing response headers and redacts the key from
+ *     error bodies,
+ *   - enforces per-attempt budgets (requests, tokens, wall-clock),
+ *   - records provider-reported usage per request as the token meter.
+ *
+ * The upstream call is injectable (`dispatch`) so the compatibility test runs
+ * against a fake/recorded Anthropic upstream with no paid calls.
+ */
+import http from 'node:http';
+import https from 'node:https';
+import net from 'node:net';
+import tls from 'node:tls';
+import { readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { URL } from 'node:url';
+import { buildRedactor, type Redactor } from './redact.js';
+
+export const DEFAULT_UPSTREAM = 'https://api.anthropic.com';
+
+/** Paths the pinned Claude Code (2.1.x) uses in API mode. Extend deliberately. */
+export const DEFAULT_ALLOWED_PATHS: readonly RegExp[] = [
+  /^\/v1\/messages(\?.*)?$/,
+  /^\/v1\/messages\/count_tokens(\?.*)?$/,
+  /^\/v1\/models(\/[A-Za-z0-9._-]+)?(\?.*)?$/,
+];
+
+/** Response headers that must never reach the agent (credential echoes). */
+const STRIP_RESPONSE_HEADERS = new Set([
+  'x-api-key',
+  'authorization',
+  'anthropic-organization-id',
+  'request-id-signature',
+  'set-cookie',
+]);
+
+export interface AttemptBudget {
+  maxRequests: number;
+  maxTokens: number;
+  maxWallMs: number;
+}
+
+export const DEFAULT_BUDGET: AttemptBudget = {
+  maxRequests: 200,
+  maxTokens: 1_000_000,
+  maxWallMs: 30 * 60 * 1000,
+};
+
+export interface AttemptUsage {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  startedAt: number;
+  overBudget: boolean;
+  lastReason?: string;
+}
+
+export interface UpstreamRequest {
+  method: string;
+  path: string;
+  headers: Record<string, string>;
+  body: Buffer;
+}
+
+export interface UpstreamResponse {
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+  /** Full body for buffered responses; omitted for streamed ones. */
+  body?: Buffer;
+  /** For SSE streaming: an async iterable of chunks. */
+  stream?: AsyncIterable<Buffer>;
+}
+
+export type Dispatch = (req: UpstreamRequest) => Promise<UpstreamResponse>;
+
+export interface GatewayConfig {
+  listenHost: string;
+  listenPort: number;
+  /** The real Anthropic key. Read from env by `gatewayFromEnv`; never logged. */
+  realKey: string;
+  upstreamBaseUrl?: string;
+  allowedPaths?: readonly RegExp[];
+  /** Outer HTTPS proxy (e.g. process.env.HTTPS_PROXY). */
+  proxyUrl?: string;
+  /** CA bundle path for the outer proxy's re-terminated TLS. */
+  caBundlePath?: string;
+  /** Injectable upstream for tests. Defaults to real HTTPS-through-proxy. */
+  dispatch?: Dispatch;
+}
+
+interface Attempt {
+  id: string;
+  token: string;
+  budget: AttemptBudget;
+  usage: AttemptUsage;
+}
+
+export class Gateway {
+  private readonly server: http.Server;
+  private readonly attempts = new Map<string, Attempt>(); // token -> attempt
+  private readonly byId = new Map<string, Attempt>();
+  private readonly upstream: URL;
+  private readonly allowed: readonly RegExp[];
+  private readonly dispatch: Dispatch;
+  private readonly redactor: Redactor;
+
+  constructor(private readonly cfg: GatewayConfig) {
+    if (!cfg.realKey) throw new Error('gateway requires a real model key');
+    this.upstream = new URL(cfg.upstreamBaseUrl ?? DEFAULT_UPSTREAM);
+    this.allowed = cfg.allowedPaths ?? DEFAULT_ALLOWED_PATHS;
+    this.redactor = buildRedactor([cfg.realKey]);
+    this.dispatch =
+      cfg.dispatch ??
+      makeProxyDispatch(this.upstream, cfg.proxyUrl, cfg.caBundlePath);
+    this.server = http.createServer((req, res) => void this.handle(req, res));
+    // Refuse CONNECT outright: no tunnelling to arbitrary hosts.
+    this.server.on('connect', (_req, socket) => {
+      socket.write('HTTP/1.1 405 Method Not Allowed\r\n\r\n');
+      socket.destroy();
+    });
+  }
+
+  /** Register a per-attempt session token + budget. */
+  registerAttempt(budget: Partial<AttemptBudget> = {}): { attemptId: string; sessionToken: string } {
+    const id = randomBytes(8).toString('hex');
+    const token = 'asbx-sess-' + randomBytes(24).toString('hex');
+    const attempt: Attempt = {
+      id,
+      token,
+      budget: { ...DEFAULT_BUDGET, ...budget },
+      usage: { requests: 0, inputTokens: 0, outputTokens: 0, startedAt: Date.now(), overBudget: false },
+    };
+    this.attempts.set(token, attempt);
+    this.byId.set(id, attempt);
+    return { attemptId: id, sessionToken: token };
+  }
+
+  usage(attemptId: string): AttemptUsage | undefined {
+    const a = this.byId.get(attemptId);
+    return a ? { ...a.usage } : undefined;
+  }
+
+  revokeAttempt(attemptId: string): void {
+    const a = this.byId.get(attemptId);
+    if (a) {
+      this.attempts.delete(a.token);
+      this.byId.delete(attemptId);
+    }
+  }
+
+  get port(): number {
+    const addr = this.server.address();
+    return typeof addr === 'object' && addr ? addr.port : this.cfg.listenPort;
+  }
+
+  start(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.server.once('error', reject);
+      this.server.listen(this.cfg.listenPort, this.cfg.listenHost, () => resolve());
+    });
+  }
+
+  stop(): Promise<void> {
+    return new Promise((resolve) => this.server.close(() => resolve()));
+  }
+
+  private deny(res: http.ServerResponse, status: number, msg: string): void {
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { type: 'gateway_denied', message: msg } }));
+  }
+
+  private authAttempt(req: http.IncomingMessage): Attempt | undefined {
+    const key = (req.headers['x-api-key'] as string | undefined)?.trim();
+    const auth = (req.headers['authorization'] as string | undefined)?.replace(/^Bearer\s+/i, '').trim();
+    const token = key || auth;
+    return token ? this.attempts.get(token) : undefined;
+  }
+
+  private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    try {
+      // Method gate: only GET/POST. (CONNECT is handled/denied separately.)
+      if (req.method !== 'GET' && req.method !== 'POST') {
+        return this.deny(res, 405, `method ${req.method} not allowed`);
+      }
+      const path = req.url ?? '';
+      // Reject absolute-form targets (proxy-style) that name another host.
+      if (/^[a-z]+:\/\//i.test(path)) {
+        return this.deny(res, 403, 'absolute-form request targets are refused');
+      }
+      if (!this.allowed.some((re) => re.test(path))) {
+        return this.deny(res, 403, `path not allowlisted: ${path}`);
+      }
+      const attempt = this.authAttempt(req);
+      if (!attempt) return this.deny(res, 401, 'unknown or missing session token');
+
+      // Budget: wall-clock + request count (pre-check), token meter.
+      const now = Date.now();
+      if (now - attempt.usage.startedAt > attempt.budget.maxWallMs) {
+        attempt.usage.overBudget = true;
+        attempt.usage.lastReason = 'wall-clock budget exceeded';
+        return this.deny(res, 429, 'attempt wall-clock budget exceeded');
+      }
+      if (attempt.usage.requests >= attempt.budget.maxRequests) {
+        attempt.usage.overBudget = true;
+        attempt.usage.lastReason = 'request budget exceeded';
+        return this.deny(res, 429, 'attempt request budget exceeded');
+      }
+      if (attempt.usage.inputTokens + attempt.usage.outputTokens >= attempt.budget.maxTokens) {
+        attempt.usage.overBudget = true;
+        attempt.usage.lastReason = 'token budget exceeded';
+        return this.deny(res, 429, 'attempt token budget exceeded');
+      }
+      attempt.usage.requests += 1;
+
+      const body = await readBody(req);
+
+      // Build the upstream request: swap the session token for the real key,
+      // fix the host, drop hop-by-hop + inbound credential headers.
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        const lk = k.toLowerCase();
+        if (['host', 'x-api-key', 'authorization', 'connection', 'content-length', 'proxy-authorization'].includes(lk)) {
+          continue;
+        }
+        if (typeof v === 'string') headers[lk] = v;
+      }
+      headers['host'] = this.upstream.host;
+      headers['x-api-key'] = this.cfg.realKey;
+      if (!headers['anthropic-version']) headers['anthropic-version'] = '2023-06-01';
+
+      const upstreamReq: UpstreamRequest = { method: req.method, path, headers, body };
+      const upstream = await this.dispatch(upstreamReq);
+
+      // Response headers: strip credential echoes; never pass Set-Cookie.
+      const outHeaders: Record<string, string | string[]> = {};
+      for (const [k, v] of Object.entries(upstream.headers)) {
+        if (v === undefined) continue;
+        if (STRIP_RESPONSE_HEADERS.has(k.toLowerCase())) continue;
+        if (k.toLowerCase() === 'content-length') continue; // may change after redaction
+        outHeaders[k] = v;
+      }
+
+      if (upstream.stream) {
+        res.writeHead(upstream.status, outHeaders);
+        for await (const chunk of upstream.stream) {
+          this.meter(attempt, chunk);
+          res.write(chunk);
+        }
+        res.end();
+        return;
+      }
+
+      let outBody = upstream.body ?? Buffer.alloc(0);
+      this.meter(attempt, outBody);
+      // Error bodies may echo the key: redact before sending to the agent.
+      if (upstream.status >= 400) {
+        const text = outBody.toString('utf8');
+        outBody = Buffer.from(this.redactor(text), 'utf8');
+      }
+      res.writeHead(upstream.status, outHeaders);
+      res.end(outBody);
+    } catch (err) {
+      // Never leak the key in an error. Redact the message defensively.
+      const msg = this.redactor(err instanceof Error ? err.message : String(err));
+      if (!res.headersSent) this.deny(res, 502, `upstream error: ${msg}`);
+      else res.end();
+    }
+  }
+
+  /** Accumulate provider-reported usage from a JSON body or an SSE chunk. */
+  private meter(attempt: Attempt, chunk: Buffer): void {
+    const text = chunk.toString('utf8');
+    // SSE: each data: line carries a JSON object with a usage field.
+    const dataLines = text.match(/data:\s*(\{.*\})/g);
+    if (dataLines) {
+      for (const line of dataLines) {
+        const json = line.replace(/^data:\s*/, '');
+        this.applyUsage(attempt, safeParse(json));
+      }
+      return;
+    }
+    // Buffered JSON.
+    const parsed = safeParse(text);
+    if (parsed) this.applyUsage(attempt, parsed);
+  }
+
+  private applyUsage(attempt: Attempt, obj: unknown): void {
+    if (!obj || typeof obj !== 'object') return;
+    const rec = obj as Record<string, unknown>;
+    const usage =
+      (rec.usage as Record<string, unknown> | undefined) ??
+      ((rec.message as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined);
+    if (!usage) return;
+    const inp = toNum(usage.input_tokens);
+    const out = toNum(usage.output_tokens);
+    // input is reported once (message_start); output is cumulative in deltas.
+    if (inp !== undefined) attempt.usage.inputTokens = Math.max(attempt.usage.inputTokens, inp);
+    if (out !== undefined) attempt.usage.outputTokens = Math.max(attempt.usage.outputTokens, out);
+  }
+}
+
+function toNum(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+function safeParse(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
+  }
+}
+
+function readBody(req: http.IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const parts: Buffer[] = [];
+    let size = 0;
+    const MAX = 32 * 1024 * 1024; // 32 MiB inbound cap
+    req.on('data', (d: Buffer) => {
+      size += d.length;
+      if (size > MAX) {
+        reject(new Error('request body too large'));
+        req.destroy();
+        return;
+      }
+      parts.push(d);
+    });
+    req.on('end', () => resolve(Buffer.concat(parts)));
+    req.on('error', reject);
+  });
+}
+
+/** Read the real key from env. Never logs it. */
+export function gatewayFromEnv(cfg: Omit<GatewayConfig, 'realKey'>): Gateway {
+  const realKey = process.env.ANTHROPIC_API_KEY;
+  if (!realKey) throw new Error('ANTHROPIC_API_KEY is not set; the gateway needs the real key');
+  return new Gateway({ ...cfg, realKey });
+}
+
+/**
+ * Real upstream dispatch: HTTPS to the fixed upstream host, tunnelled through
+ * the outer HTTPS proxy (CONNECT) when one is configured. Streams SSE through.
+ * Not exercised in CI (the compat test injects a fake dispatch).
+ */
+export function makeProxyDispatch(
+  upstream: URL,
+  proxyUrl?: string,
+  caBundlePath?: string,
+): Dispatch {
+  const ca = caBundlePath ? readFileSync(caBundlePath) : undefined;
+  const host = upstream.hostname;
+  const port = upstream.port ? Number(upstream.port) : 443;
+
+  async function connectSocket(): Promise<net.Socket> {
+    if (!proxyUrl) {
+      return net.connect({ host, port });
+    }
+    const p = new URL(proxyUrl);
+    const sock = net.connect({ host: p.hostname, port: Number(p.port || 80) });
+    await new Promise<void>((resolve, reject) => {
+      sock.once('error', reject);
+      sock.once('connect', () => {
+        sock.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`);
+      });
+      let buf = '';
+      const onData = (d: Buffer): void => {
+        buf += d.toString('latin1');
+        if (buf.includes('\r\n\r\n')) {
+          sock.removeListener('data', onData);
+          if (/^HTTP\/1\.[01] 200/.test(buf)) resolve();
+          else reject(new Error('proxy CONNECT failed: ' + buf.split('\r\n')[0]));
+        }
+      };
+      sock.on('data', onData);
+    });
+    return sock;
+  }
+
+  return async (req: UpstreamRequest): Promise<UpstreamResponse> => {
+    const socket = await connectSocket();
+    const secure = tls.connect({ socket, servername: host, ...(ca ? { ca } : {}) });
+    await new Promise<void>((resolve, reject) => {
+      secure.once('secureConnect', () => resolve());
+      secure.once('error', reject);
+    });
+    return await new Promise<UpstreamResponse>((resolve, reject) => {
+      const r = https.request(
+        { createConnection: () => secure, method: req.method, path: req.path, headers: req.headers, host },
+        (resp) => {
+          const isStream = (resp.headers['content-type'] ?? '').includes('text/event-stream');
+          if (isStream) {
+            resolve({ status: resp.statusCode ?? 502, headers: resp.headers, stream: resp as AsyncIterable<Buffer> });
+          } else {
+            const parts: Buffer[] = [];
+            resp.on('data', (d: Buffer) => parts.push(d));
+            resp.on('end', () =>
+              resolve({ status: resp.statusCode ?? 502, headers: resp.headers, body: Buffer.concat(parts) }),
+            );
+          }
+        },
+      );
+      r.once('error', reject);
+      if (req.body.length) r.write(req.body);
+      r.end();
+    });
+  };
+}

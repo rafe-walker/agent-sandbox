@@ -7,6 +7,24 @@ semantic versioning once past 0.x.
 ## [Unreleased]
 
 ### Added
+- The model auth gateway. The real Anthropic key lives only here; the agent
+  gets `ANTHROPIC_BASE_URL` + a random per-attempt session token, which the
+  gateway swaps for the real key. It allowlists the API paths the pinned Claude
+  Code (2.1.x) uses, refuses CONNECT and absolute-form/arbitrary-host targets,
+  pins the upstream host, strips credential-bearing response headers, redacts
+  the key from error bodies, enforces per-attempt request/token/wall-clock
+  budgets, and records provider-reported usage per request as the token meter
+  (SSE and buffered JSON). The upstream call is injectable so the compatibility
+  test runs against a fake/recorded upstream with no paid calls; the real
+  dispatch tunnels through the outer HTTPS proxy (CONNECT) with the CA bundle.
+- Echoed-credential redaction helper (`buildRedactor`): exact, JSON-escaped,
+  URL-encoded, base64 (std + url-safe) and split forms. Documented as a
+  mitigation, not a proof.
+- Base-URL compatibility test (gated on the `claude` binary +
+  `AGENT_SANDBOX_CLAUDE_COMPAT=1`): spawns the real CLI against the gateway with
+  a fake SSE upstream and asserts headless streaming round-trips with a session
+  token only. An optional live Haiku smoke (<= $0.10) is gated off by default
+  and never runs in CI.
 - The per-attempt network cage. A dedicated netns joined by a veth pair; the
   launcher runs the sandbox under `ip netns exec` so it inherits the cage. Host
   nftables live in our OWN `inet asbx_<id>` table (the host's existing ruleset
