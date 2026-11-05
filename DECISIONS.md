@@ -92,3 +92,22 @@ this VM's host network) was routable from the sandbox.
 on-link /30 peer (the gateway).
 **Consequences**: Defence in depth: external and metadata destinations fail
 with "network unreachable" before nftables is consulted.
+
+## 2026-11-05 — One launch path for production and the attacker suite
+
+**Context**: The escape review found the launch chain inherited the harness
+env, so bwrap (pid 1 in the agent's PID namespace, running as the worker uid)
+exposed the harness credentials at `/proc/1/environ`. Preflight still said
+PUBLISHABLE, because the suite's runner had its own command line and env and
+measured something other than what production ran.
+**Decision**: `buildSandboxInvocation()` is the single, pure source of the
+command line AND the environment, and `launchWith()` is the single runner.
+`launch()` delegates to it with every protection on. The suite calls the same
+function; positive controls switch exactly one protection off through an
+explicit `UnsafeControls` argument that `launch()` never passes. Tests fail
+if the suite harness builds its own command line or spawns anything, if
+`drop:'none'` differs from the production invocation, or if any `src` file
+imports `node:child_process` without `MINIMAL_ENV`.
+**Consequences**: The preflight measures exactly what real runs get. Helpers
+never inherit `process.env`. The capability probe and a dedicated attack scan
+every visible process, not only themselves.
