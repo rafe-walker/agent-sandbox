@@ -7,6 +7,24 @@ semantic versioning once past 0.x.
 ## [Unreleased]
 
 ### Added
+- The launcher. Runs an untrusted command through
+  `prlimit -> setpriv -> [ip netns exec] -> bwrap`: a dedicated per-worker uid
+  with a PRIVATE group (never a shared gid such as `docker`); user/pid/ipc/uts
+  namespaces (+ net isolation unless a prepared netns is joined),
+  `--die-with-parent`, `--new-session`, `--cap-drop ALL`, and `--clearenv` so
+  the harness environment (and its credentials) never cross; read-only `/usr`
+  and `/etc` and a read-only source bind; a fresh HOME, private `/tmp` and
+  `/dev/shm`, a new `/proc`, a minimal `/dev`, no `/run`; rlimits
+  (NPROC/AS/FSIZE/NOFILE) and a wall-clock SIGKILL; fd hygiene (only stdio is
+  inherited, assertable from inside). Teardown SIGKILLs the PID namespace and
+  polls until no worker-owned process survives, including detached children,
+  then removes the uid and its group.
+- Launcher-backed capability probes (uid_separated, pid_ns, mount_ns,
+  fds_clean, creds_absent) wired into the preflight, each a measured check run
+  inside the real sandbox config. `creds_absent` plants a credential canary in
+  the harness env and asserts `--clearenv` keeps it out.
+- CI `sandbox` job runs the full suite as root with
+  `AGENT_SANDBOX_REQUIRE_CAPS=1` so a host that cannot sandbox fails closed.
 - Profiles (`dev`, `linux-sandbox`, `microvm` reserved), the capability report
   schema, and the preflight runner. The report records *measured* capabilities
   (uid_separated, pid_ns, mount_ns, net_enforced, creds_absent, fds_clean,

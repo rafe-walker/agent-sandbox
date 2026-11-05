@@ -45,7 +45,8 @@ jobs:
             --tmpfs /tmp -- /bin/true
           echo "namespaces OK"
       - run: npm ci
-      - name: Run full suite under sandbox (never AGENT_SANDBOX_SKIP)
-        env:
-          AGENT_SANDBOX_REQUIRE_CAPS: "1"
-        run: npm test
+      # The launcher allocates a worker uid and programs netns/nftables, so the
+      # suite must run as root. AGENT_SANDBOX_REQUIRE_CAPS=1 makes a host that
+      # cannot sandbox FAIL here rather than skip silently.
+      - name: Run full suite under sandbox as root (never skip silently)
+        run: sudo --preserve-env=PATH env AGENT_SANDBOX_REQUIRE_CAPS=1 "PATH=$PATH" npm test
