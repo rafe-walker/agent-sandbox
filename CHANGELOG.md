@@ -7,6 +7,21 @@ semantic versioning once past 0.x.
 ## [Unreleased]
 
 ### Added
+- The core attacker suite: 25 attacks, each run under the real sandbox config
+  AND under a positive control that disables exactly one protection (the
+  control must succeed, or the attack fails). Filesystem (control file, setup
+  state, call log, findings, symlink escape); /proc and ptrace against the
+  harness; inherited fds; detached-process survival; direct egress, egress with
+  HTTPS_PROXY unset, IPv6, DNS, the metadata IP; CONNECT through the gateway;
+  credentials via env, /proc and fds; reflected canary in plain, base64,
+  URL-encoded and split forms; fork bomb, disk fill, SIGKILL mid-write. Runs in
+  CI and in `agent-sandbox preflight`; results are recorded host-side.
+- An explicit `notApplicable` attack outcome, allowed only when the harness
+  proves the vector is absent on the host (e.g. a kernel booted
+  `ipv6.disable=1`). The attack must still be blocked; N/A results are counted
+  and listed in the report, never hidden.
+- `agent-sandbox cleanup` and `cleanupStaleWorkers()` remove leftover `asbx_w*`
+  uids (plus netns/nft/veth) after a crash. Not run automatically.
 - The trusted evidence collector. A per-attempt UNIX socket under a root-owned
   dir; the agent submits versioned, schema-validated, size-bounded (64 KiB)
   proposals and the collector assigns the id, timestamp, seq and attempt
@@ -80,3 +95,18 @@ semantic versioning once past 0.x.
   SECURITY.md, DECISIONS.md, and GitHub Actions CI. The Linux CI job
   apt-installs bubblewrap and **fails closed** if namespace support is
   missing — it never skips the sandbox suite silently.
+
+### Changed
+- The network cage no longer installs a default route: the sandbox can only
+  reach its on-link /30 peer, so external and metadata IPs are unroutable
+  before nftables is consulted.
+- Survivor counts ignore zombies (bwrap's namespace init briefly lingers as one
+  after exit; it runs no code).
+- Default `RLIMIT_AS` lowered to 1 GiB; vitest runs with a single worker.
+
+### Fixed
+- The `/proc/self/environ` credential check was vacuous: a shell redirect
+  opens environ before `exec`, after which the kernel returns EOF, so a leak
+  could never be seen. Both the `cred-proc` attack and the `creds_absent`
+  probe now read it with `cat` (opened after exec), and the attack's positive
+  control proves the check can fire.

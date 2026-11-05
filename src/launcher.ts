@@ -63,11 +63,13 @@ export async function allocateWorker(): Promise<Worker> {
 }
 
 async function countOwned(uid: number): Promise<number> {
+  // Count LIVE processes only: a zombie (state Z) runs no code and is just
+  // awaiting reaping by host init (bwrap's ns-init briefly lingers as one).
   try {
-    const { stdout } = await pExecFile('pgrep', ['-u', String(uid)]);
-    return stdout.trim() ? stdout.trim().split('\n').length : 0;
+    const { stdout } = await pExecFile('ps', ['-o', 'stat=', '-u', String(uid)]);
+    return stdout.split('\n').filter((s) => s.trim() && !s.trim().startsWith('Z')).length;
   } catch {
-    return 0; // pgrep exits 1 when none match
+    return 0; // ps exits 1 when none match
   }
 }
 
@@ -104,6 +106,30 @@ export async function releaseWorker(worker: Worker): Promise<{ survivors: number
   return { survivors };
 }
 
+/**
+ * Remove every leftover `asbx_w*` worker uid (and its private group) from
+ * crashed runs: kill what it owns, then userdel. NOT run automatically — a
+ * concurrent run on the same host would lose its workers. Call it explicitly
+ * (`agent-sandbox cleanup`) when no other run is active.
+ */
+export async function cleanupStaleWorkers(): Promise<string[]> {
+  if (process.platform !== 'linux') return [];
+  const removed: string[] = [];
+  let passwd = '';
+  try {
+    passwd = (await pExecFile('getent', ['passwd'])).stdout;
+  } catch {
+    return removed;
+  }
+  for (const line of passwd.split('\n')) {
+    const [name, , uidStr, gidStr] = line.split(':');
+    if (!name?.startsWith(WORKER_PREFIX)) continue;
+    await releaseWorker({ name, uid: Number(uidStr), gid: Number(gidStr) });
+    removed.push(name);
+  }
+  return removed;
+}
+
 export interface Bind {
   src: string;
   dest: string;
@@ -122,7 +148,7 @@ export interface Rlimits {
 
 export const DEFAULT_RLIMITS: Rlimits = {
   nproc: 128,
-  as: 2 * 1024 * 1024 * 1024, // 2 GiB
+  as: 1024 * 1024 * 1024, // 1 GiB (shared host; cap memory-heavy work)
   fsize: 256 * 1024 * 1024, // 256 MiB
   nofile: 256,
 };

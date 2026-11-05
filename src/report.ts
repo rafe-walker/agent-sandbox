@@ -45,6 +45,13 @@ export const attackResultSchema = z.object({
   controlSucceeded: z.boolean(),
   status: probeStatusSchema,
   detail: z.string().max(4000).optional(),
+  /**
+   * Set ONLY when the harness (not the sandbox) proved the attack vector does
+   * not exist on this host (e.g. the kernel has no IPv6), so no positive
+   * control is possible. The attack must still be blocked; it is counted and
+   * listed in the report, never hidden.
+   */
+  notApplicable: z.string().max(400).optional(),
 });
 export type AttackResult = z.infer<typeof attackResultSchema>;
 
@@ -55,6 +62,7 @@ export const suiteResultSchema = z.object({
   ran: z.number().int().nonnegative(),
   blocked: z.number().int().nonnegative(),
   failed: z.number().int().nonnegative(),
+  notApplicable: z.number().int().nonnegative(),
   attacks: z.array(attackResultSchema),
 });
 export type SuiteResult = z.infer<typeof suiteResultSchema>;
@@ -130,10 +138,15 @@ export function derivePublishable(input: {
 export function foldSuite(attacks: AttackResult[], version = SUITE_VERSION): SuiteResult {
   const ran = attacks.length;
   const blocked = attacks.filter((a) => a.blocked).length;
-  const failed = attacks.filter((a) => a.status === 'fail' || !a.blocked || !a.controlSucceeded).length;
+  // An N/A attack is excused only from its positive control; it must still be
+  // blocked. Everything else needs blocked AND a successful control.
+  const failed = attacks.filter(
+    (a) => a.status === 'fail' || !a.blocked || (!a.notApplicable && !a.controlSucceeded),
+  ).length;
+  const notApplicable = attacks.filter((a) => a.notApplicable).length;
   // Pass only when at least one attack ran and none failed.
   const result: ProbeStatus = ran === 0 ? 'not-probed' : failed === 0 ? 'pass' : 'fail';
-  return { version, result, ran, blocked, failed, attacks };
+  return { version, result, ran, blocked, failed, notApplicable, attacks };
 }
 
 /** Human-readable one-screen summary of a report. */
@@ -151,8 +164,12 @@ export function formatReport(r: CapabilityReport): string {
   }
   lines.push(
     `  attacker suite: v${r.suite.version} ${r.suite.result} ` +
-      `(ran ${r.suite.ran}, blocked ${r.suite.blocked}, failed ${r.suite.failed})`,
+      `(ran ${r.suite.ran}, blocked ${r.suite.blocked}, failed ${r.suite.failed}, n/a ${r.suite.notApplicable})`,
   );
+  for (const a of r.suite.attacks) {
+    const mark = a.notApplicable ? 'n/a' : a.status === 'pass' ? 'ok ' : 'FAIL';
+    lines.push(`    [${mark}] ${a.id}${a.notApplicable ? ` — ${a.notApplicable}` : a.status !== 'pass' && a.detail ? ` — ${a.detail}` : ''}`);
+  }
   lines.push(`  PUBLISHABLE: ${r.publishable ? 'yes' : 'NO'}`);
   if (!r.publishable) for (const why of r.reasons) lines.push(`    - ${why}`);
   return lines.join('\n');

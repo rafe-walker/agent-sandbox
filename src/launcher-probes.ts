@@ -91,7 +91,8 @@ export function launcherProbes(sourceDir?: string): CapabilityProbe[] {
         process.env.ASBX_CRED_CANARY = canary;
         try {
           const r = await runInSandbox(
-            'env; echo ---; tr "\\0" "\\n" < /proc/self/environ 2>/dev/null',
+            // cat opens environ after exec; a `<` redirect would read EOF.
+            'env; echo ---; cat /proc/self/environ 2>/dev/null | tr "\\0" "\\n"',
             common,
           );
           const out = r.stdout ?? '';

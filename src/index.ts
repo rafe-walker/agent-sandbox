@@ -36,6 +36,7 @@ export {
 export {
   allocateWorker,
   releaseWorker,
+  cleanupStaleWorkers,
   launch,
   runInSandbox,
   buildBwrapArgs,
@@ -90,3 +91,4 @@ export {
 } from './collector.js';
 export { evidenceWriterProbe, canCollect } from './collector-probes.js';
 export { assembleCapabilityProbes, type AssembleOptions } from './probes.js';
+export { coreAttacks, SUITE_SIZE } from './attacks/index.js';

@@ -4,8 +4,10 @@ import { isProfile, type Profile } from './profiles.js';
 import { formatReport } from './report.js';
 import { runPreflight, checkPrereqs } from './preflight.js';
 import { assembleCapabilityProbes } from './probes.js';
+import { coreAttacks } from './attacks/index.js';
+import { canLaunch } from './launcher-probes.js';
 
-const COMMANDS = ['preflight', 'run', 'gateway', 'collector', 'submit'] as const;
+const COMMANDS = ['preflight', 'run', 'gateway', 'collector', 'submit', 'cleanup'] as const;
 
 function usage(): void {
   process.stderr.write(
@@ -21,6 +23,7 @@ function usage(): void {
       '                                 Run the trusted evidence collector',
       '  agent-sandbox submit --socket <s> --kind <k> [--data <json>]',
       '                                 Submit a proposal (host-side helper)',
+      '  agent-sandbox cleanup          Remove leftover asbx_ uids/netns/nft/veth from crashed runs',
       '',
     ].join('\n'),
   );
@@ -47,6 +50,8 @@ async function cmdPreflight(argv: string[]): Promise<number> {
   const report = await runPreflight({
     profile,
     capabilityProbes: assembleCapabilityProbes(sourceArg ? { sourceDir: sourceArg } : {}),
+    // The 25-attack suite runs when this host can launch sandboxes.
+    attacks: canLaunch() ? coreAttacks() : [],
   });
 
   if (json) {
@@ -105,6 +110,15 @@ async function cmdSubmit(argv: string[]): Promise<number> {
   return receipt.ok ? 0 : 1;
 }
 
+async function cmdCleanup(): Promise<number> {
+  const { cleanupStaleWorkers } = await import('./launcher.js');
+  const { cleanupStale } = await import('./net.js');
+  const workers = await cleanupStaleWorkers();
+  const net = await cleanupStale();
+  process.stdout.write(JSON.stringify({ workers, ...net }) + '\n');
+  return 0;
+}
+
 async function main(): Promise<number> {
   const [, , cmd, ...rest] = process.argv;
   if (!cmd || cmd === '-h' || cmd === '--help') {
@@ -123,6 +137,8 @@ async function main(): Promise<number> {
       return cmdCollector(rest);
     case 'submit':
       return cmdSubmit(rest);
+    case 'cleanup':
+      return cmdCleanup();
     default:
       process.stderr.write(`${cmd}: not implemented in this build\n`);
       return 1;

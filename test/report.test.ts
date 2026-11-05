@@ -111,6 +111,17 @@ describe('foldSuite', () => {
     expect(s.result).toBe('fail');
   });
 
+  it('excuses an N/A attack from its control but still requires it be blocked', () => {
+    const na = { ...passingAttack, id: 'v6', controlSucceeded: false, notApplicable: 'host has no IPv6' };
+    expect(foldSuite([na]).result).toBe('pass');
+    expect(foldSuite([na]).notApplicable).toBe(1);
+    expect(foldSuite([{ ...na, blocked: false }]).result).toBe('fail');
+  });
+
+  it('a missing control without an N/A reason fails', () => {
+    expect(foldSuite([{ ...passingAttack, controlSucceeded: false }]).result).toBe('fail');
+  });
+
   it('counts blocked attacks', () => {
     const s = foldSuite([passingAttack, { ...passingAttack, id: 'a2' }]);
     expect(s.blocked).toBe(2);
