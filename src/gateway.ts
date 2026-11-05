@@ -55,6 +55,24 @@ export const DEFAULT_BUDGET: AttemptBudget = {
   maxWallMs: 30 * 60 * 1000,
 };
 
+/**
+ * Validate a budget. Every field must be a finite, non-negative safe integer.
+ * NaN/Infinity/1e400/negatives/strings are rejected: `requests >= NaN` is
+ * always false, so an unvalidated NaN would silently mean "unlimited".
+ */
+export function validateBudget(b: Partial<AttemptBudget>): AttemptBudget {
+  const out: AttemptBudget = { ...DEFAULT_BUDGET };
+  for (const key of ['maxRequests', 'maxTokens', 'maxWallMs'] as const) {
+    if (!(key in b)) continue;
+    const v: unknown = b[key];
+    if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) {
+      throw new Error(`invalid budget ${key}: ${String(v)} (need a non-negative safe integer)`);
+    }
+    out[key] = v;
+  }
+  return out;
+}
+
 export interface AttemptUsage {
   requests: number;
   inputTokens: number;
@@ -136,7 +154,7 @@ export class Gateway {
     const attempt: Attempt = {
       id,
       token,
-      budget: { ...DEFAULT_BUDGET, ...budget },
+      budget: validateBudget(budget),
       usage: { requests: 0, inputTokens: 0, outputTokens: 0, startedAt: Date.now(), overBudget: false },
     };
     this.attempts.set(token, attempt);

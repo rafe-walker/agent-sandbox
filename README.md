@@ -52,13 +52,56 @@ preflight attacker suite passed on this host. There is no silent downgrade.
 ## CLI
 
 ```
-agent-sandbox preflight         # probe capabilities + run attacker suite, print report
-agent-sandbox run   -- <cmd>    # launch a command inside the sandbox
-agent-sandbox gateway           # run the model auth gateway
-agent-sandbox collector         # run the trusted evidence collector
+agent-sandbox preflight [--profile linux-sandbox|dev] [--source <dir>] [--json]
+agent-sandbox run [--profile ...] [--source <dir>] [--wall-ms n] [--gateway-port p] [--env K=V ...] -- <cmd...>
+agent-sandbox gateway --listen <host:port> [--max-requests n] [--max-tokens n] [--max-wall-ms n] [--ca <bundle>]
+agent-sandbox collector --run-dir <d> --attempt <id> [--worker-uid <uid>]
+agent-sandbox submit --socket <s> --kind <k> [--data <json>]
+agent-sandbox cleanup          # remove asbx_ uids/netns/nft/veth left by a crashed run
+sandbox-submit --kind <k> [--data <json>]   # inside the sandbox
 ```
 
-See [`docs/`](./docs) for the library API.
+`preflight` exits 0 only when the run is publishable. The library API and a
+full harness composition are in [`docs/API.md`](./docs/API.md).
+
+## Claude Code compatibility
+
+Verified with the pinned **Claude Code 2.1.318**. `claude -p` with
+`ANTHROPIC_BASE_URL` pointed at the gateway and `ANTHROPIC_API_KEY` set to the
+per-attempt **session token** completes headless streaming against a fake
+upstream. It sends `POST /v1/messages?beta=true`, and the gateway injects the
+real key upstream, so the CLI does **not** need the real key in-process.
+The `gateway-compat` test reproduces this; it is gated on the `claude`
+binary and `AGENT_SANDBOX_CLAUDE_COMPAT=1`, and makes no paid calls.
+Streaming, retries and tool use are covered against a fake upstream in
+`gateway.test.ts`. If a future CLI insists on the real key in-process, the
+compat test fails and the profile must not be used.
+
+## Not enforced, or enforced differently (honest list)
+
+- **cgroups.** The host has cgroup v1 only and no cgroup delegation, so
+  CPU/memory are bounded with rlimits (NPROC, AS, FSIZE, NOFILE) plus a
+  wall-clock SIGKILL, not cgroup limits. RLIMIT_NPROC is per-uid, which is
+  why every worker gets its own uid.
+- **SO_PEERCRED.** Node core has no `getsockopt`. Caller identity on the
+  collector is enforced by socket ownership instead: one 0600 socket per
+  attempt, owned by that attempt's uid. See DECISIONS.md.
+- **IPv6 on kernels without IPv6.** The attack is reported `n/a` (still
+  blocked) because no positive control is possible. On hosts with IPv6 it runs
+  with a control.
+- **The agent binary.** The sandbox binds only `/usr`, `/etc` and the source.
+  An agent installed elsewhere (e.g. node under `/opt`) must be bind-mounted
+  read-only by the caller.
+
+## Testing
+
+```
+npm ci && npm run lint && npm run typecheck
+sudo AGENT_SANDBOX_REQUIRE_CAPS=1 npm test   # root: allocates uids, programs nft
+```
+
+`AGENT_SANDBOX_REQUIRE_CAPS=1` turns a host that cannot sandbox into a test
+failure instead of a skip; CI always sets it. Tests run with one worker.
 
 ## Requirements
 

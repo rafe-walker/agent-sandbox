@@ -257,6 +257,23 @@ describe('gateway: credential hygiene', () => {
   });
 });
 
+describe('gateway: budget validation (number tricks fail closed)', () => {
+  it.each([NaN, Infinity, -1, Number('1e400'), 1.5, '10' as unknown as number])('rejects maxRequests=%s', async (v) => {
+    const g = track(new Gateway({ listenHost: '127.0.0.1', listenPort: 0, realKey: REAL_KEY, dispatch: async () => ({ status: 200, headers: {}, body: Buffer.from('{}') }) }));
+    await g.start();
+    expect(() => g.registerAttempt({ maxRequests: v })).toThrow(/invalid budget maxRequests/);
+    expect(() => g.registerAttempt({ maxTokens: v })).toThrow(/invalid budget maxTokens/);
+    expect(() => g.registerAttempt({ maxWallMs: v })).toThrow(/invalid budget maxWallMs/);
+  });
+
+  it('accepts zero (deny-all) and plain integers', async () => {
+    const g = track(new Gateway({ listenHost: '127.0.0.1', listenPort: 0, realKey: REAL_KEY, dispatch: async () => ({ status: 200, headers: {}, body: Buffer.from('{}') }) }));
+    await g.start();
+    const { sessionToken } = g.registerAttempt({ maxRequests: 0 });
+    expect((await request(g, { path: '/v1/messages', token: sessionToken, body: '{}' })).status).toBe(429);
+  });
+});
+
 describe('gateway: streamed bodies are redacted (sliding window)', () => {
   it('redacts the real key in SSE, including when split across chunk boundaries', async () => {
     const half = Math.floor(REAL_KEY.length / 2);
