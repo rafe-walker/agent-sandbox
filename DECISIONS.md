@@ -65,3 +65,49 @@ a single shared socket with in-band attempt ids (rejected: agent-forgeable).
 the socket path must be traverse-reachable (0711); documented here and in the
 collector source. A native SO_PEERCRED check can be added later as
 defence-in-depth without changing the model.
+
+## 2026-11-05 — Attacker suite: every attack carries a genuine positive control
+
+**Context**: A blocked attack proves nothing if the test could never have seen a
+success. During the build two checks were found vacuous: a hardcoded
+`controlSucceeded = true` for detached-process survival, and a
+`/proc/self/environ` read via shell redirect, which returns EOF after exec.
+**Decision**: Each attack runs twice: under the real config, and under a
+control with exactly one protection removed (PID ns, net ns, clearenv, fd
+closing, a bind, the nft drop, redaction, rlimit size). `pass` requires
+blocked AND control succeeded.
+**Exception**: `notApplicable`, allowed only when the HARNESS (not the
+sandbox) proves the vector does not exist on the host (today: a kernel with no
+IPv6). The attack must still be blocked, and N/A results are listed in the
+report.
+**Consequences**: The suite is slower (two launches per attack, ~1–4 s each)
+but cannot pass by construction.
+
+## 2026-11-05 — No default route inside the network cage
+
+**Context**: The cage had a default route via the host veth. nftables plus
+`ip_forward=0` still dropped everything, but 169.254.169.254 (which answers on
+this VM's host network) was routable from the sandbox.
+**Decision**: Install no default route. The only reachable address is the
+on-link /30 peer (the gateway).
+**Consequences**: Defence in depth: external and metadata destinations fail
+with "network unreachable" before nftables is consulted.
+
+## 2026-11-05 — One launch path for production and the attacker suite
+
+**Context**: The escape review found the launch chain inherited the harness
+env, so bwrap (pid 1 in the agent's PID namespace, running as the worker uid)
+exposed the harness credentials at `/proc/1/environ`. Preflight still said
+PUBLISHABLE, because the suite's runner had its own command line and env and
+measured something other than what production ran.
+**Decision**: `buildSandboxInvocation()` is the single, pure source of the
+command line AND the environment, and `launchWith()` is the single runner.
+`launch()` delegates to it with every protection on. The suite calls the same
+function; positive controls switch exactly one protection off through an
+explicit `UnsafeControls` argument that `launch()` never passes. Tests fail
+if the suite harness builds its own command line or spawns anything, if
+`drop:'none'` differs from the production invocation, or if any `src` file
+imports `node:child_process` without `MINIMAL_ENV`.
+**Consequences**: The preflight measures exactly what real runs get. Helpers
+never inherit `process.env`. The capability probe and a dedicated attack scan
+every visible process, not only themselves.

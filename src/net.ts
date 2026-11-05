@@ -202,7 +202,9 @@ export async function setupNetwork(opts: SetupOptions): Promise<NetHandle> {
     await run('ip', ['netns', 'exec', n.netns, 'ip', 'addr', 'add', `${sandbox}/30`, 'dev', n.vethSandbox]);
     await run('ip', ['netns', 'exec', n.netns, 'ip', 'link', 'set', n.vethSandbox, 'up']);
     await run('ip', ['netns', 'exec', n.netns, 'ip', 'link', 'set', 'lo', 'up']);
-    await run('ip', ['netns', 'exec', n.netns, 'ip', 'route', 'add', 'default', 'via', host]);
+    // Deliberately NO default route: the only reachable address is the on-link
+    // /30 peer (the gateway). External, metadata (169.254.169.254) and every
+    // other destination are unroutable before nftables is even consulted.
     // No resolv.conf is installed in the netns -> no DNS. nft also drops :53.
 
     // Host-side nftables: OUR table only. input hook, policy accept (so host
