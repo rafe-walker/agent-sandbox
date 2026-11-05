@@ -35,14 +35,25 @@ jobs:
       - name: Verify namespace support (fail closed)
         run: |
           set -e
+          # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor.
+          # This runner is ephemeral, so lift that restriction explicitly and
+          # visibly here (never on a real host). If namespaces still do not
+          # work, the smoke below FAILS the job; it never skips.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
           if [ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 1)" = "0" ]; then
             echo "::error::Unprivileged user namespaces are disabled on this runner. Failing closed."
             exit 1
           fi
-          # A real bwrap smoke so a broken runner fails here, not mid-suite.
-          bwrap --unshare-user --unshare-pid --unshare-net --dev /dev --proc /proc \
+          # Real bwrap smoke (as the runner user AND as an unprivileged uid,
+          # which is how the launcher runs it) so a broken runner fails here.
+          # /lib64 is required: /bin/true needs the dynamic loader.
+          ARGS="--unshare-user --unshare-pid --unshare-net --die-with-parent \
             --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
-            --tmpfs /tmp -- /bin/true
+            --symlink usr/lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp -- /bin/true"
+          bwrap $ARGS
+          sudo setpriv --reuid=65534 --regid=65534 --clear-groups -- bwrap $ARGS
           echo "namespaces OK"
       - run: npm ci
       # The launcher allocates a worker uid and programs netns/nftables, so the
