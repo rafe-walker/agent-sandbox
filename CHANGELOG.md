@@ -6,6 +6,18 @@ semantic versioning once past 0.x.
 
 ## [Unreleased]
 
+### Fixed
+- **Gateway usage meter undercounted multi-request attempts.** It kept the
+  max of each field across *all* responses of an attempt, so an agent making
+  20 calls was metered as one, and the token budget could be exceeded about
+  20-fold. It now takes the max within one response (input in
+  `message_start`, cumulative output in deltas) and sums across responses.
+  It also meters `cache_read_input_tokens` / `cache_creation_input_tokens`
+  (new `cacheReadTokens` / `cacheCreationTokens`; `totalTokens(usage)` sums
+  all four, and the budget uses it). SSE data lines split across chunks are
+  buffered, a cut stream still counts what it reported, and non-integer,
+  negative or non-finite counts are ignored.
+
 ### Added
 - **Signed preflight reports.** `agent-sandbox preflight --sign --out FILE`
   signs the capability report with a per-host Ed25519 key (private half

@@ -75,8 +75,11 @@ export function validateBudget(b: Partial<AttemptBudget>): AttemptBudget {
 
 export interface AttemptUsage {
   requests: number;
+  /** Uncached input tokens, summed over every response of the attempt. */
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
   startedAt: number;
   overBudget: boolean;
   lastReason?: string;
@@ -155,7 +158,7 @@ export class Gateway {
       id,
       token,
       budget: validateBudget(budget),
-      usage: { requests: 0, inputTokens: 0, outputTokens: 0, startedAt: Date.now(), overBudget: false },
+      usage: { requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, startedAt: Date.now(), overBudget: false },
     };
     this.attempts.set(token, attempt);
     this.byId.set(id, attempt);
@@ -232,7 +235,7 @@ export class Gateway {
         attempt.usage.lastReason = 'request budget exceeded';
         return this.deny(res, 429, 'attempt request budget exceeded');
       }
-      if (attempt.usage.inputTokens + attempt.usage.outputTokens >= attempt.budget.maxTokens) {
+      if (totalTokens(attempt.usage) >= attempt.budget.maxTokens) {
         attempt.usage.overBudget = true;
         attempt.usage.lastReason = 'token budget exceeded';
         return this.deny(res, 429, 'attempt token budget exceeded');
@@ -273,10 +276,16 @@ export class Gateway {
         // reads the raw provider chunk (usage numbers never contain the key).
         const sr = this.redactor.stream();
         const decoder = new TextDecoder('utf-8');
-        for await (const chunk of upstream.stream) {
-          this.meter(attempt, chunk);
-          const safe = sr.push(decoder.decode(chunk, { stream: true }));
-          if (safe) res.write(safe);
+        const m = new ResponseMeter();
+        try {
+          for await (const chunk of upstream.stream) {
+            m.pushSse(chunk);
+            const safe = sr.push(decoder.decode(chunk, { stream: true }));
+            if (safe) res.write(safe);
+          }
+        } finally {
+          // why: a cut stream still consumed what it reported; count it.
+          m.addTo(attempt.usage);
         }
         const rest = sr.push(decoder.decode()) + sr.flush();
         if (rest) res.write(rest);
@@ -285,7 +294,9 @@ export class Gateway {
       }
 
       let outBody = upstream.body ?? Buffer.alloc(0);
-      this.meter(attempt, outBody);
+      const m = new ResponseMeter();
+      m.pushJson(outBody);
+      m.addTo(attempt.usage);
       // Error bodies may echo the key: redact before sending to the agent.
       if (upstream.status >= 400) {
         const text = outBody.toString('utf8');
@@ -301,40 +312,75 @@ export class Gateway {
     }
   }
 
-  /** Accumulate provider-reported usage from a JSON body or an SSE chunk. */
-  private meter(attempt: Attempt, chunk: Buffer): void {
-    const text = chunk.toString('utf8');
-    // SSE: each data: line carries a JSON object with a usage field.
-    const dataLines = text.match(/data:\s*(\{.*\})/g);
-    if (dataLines) {
-      for (const line of dataLines) {
-        const json = line.replace(/^data:\s*/, '');
-        this.applyUsage(attempt, safeParse(json));
-      }
-      return;
-    }
-    // Buffered JSON.
-    const parsed = safeParse(text);
-    if (parsed) this.applyUsage(attempt, parsed);
+}
+
+/** Every token the provider reported for an attempt (budget and meter total). */
+export function totalTokens(u: Pick<AttemptUsage, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens'>): number {
+  return u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheCreationTokens;
+}
+
+const MAX_SSE_LINE = 1024 * 1024;
+
+/**
+ * Provider-reported usage of ONE response. Within a response each field is
+ * the max seen (input is reported in message_start, output is cumulative in
+ * message_delta); across responses the attempt totals are summed.
+ */
+class ResponseMeter {
+  private inp = 0;
+  private out = 0;
+  private cacheRead = 0;
+  private cacheCreate = 0;
+  private buf = '';
+  private readonly decoder = new TextDecoder('utf-8');
+
+  pushJson(body: Buffer): void {
+    this.apply(safeParse(body.toString('utf8')));
   }
 
-  private applyUsage(attempt: Attempt, obj: unknown): void {
+  /** SSE: data lines may be split across chunks, so buffer up to each newline. */
+  pushSse(chunk: Buffer): void {
+    this.buf += this.decoder.decode(chunk, { stream: true });
+    let i: number;
+    while ((i = this.buf.indexOf('\n')) >= 0) {
+      this.line(this.buf.slice(0, i));
+      this.buf = this.buf.slice(i + 1);
+    }
+    if (this.buf.length > MAX_SSE_LINE) this.buf = ''; // an oversized line never carries usage we trust
+  }
+
+  private line(l: string): void {
+    const m = /^data:\s*(\{.*\})\s*$/.exec(l);
+    if (m) this.apply(safeParse(m[1]!));
+  }
+
+  private apply(obj: unknown): void {
     if (!obj || typeof obj !== 'object') return;
     const rec = obj as Record<string, unknown>;
     const usage =
       (rec.usage as Record<string, unknown> | undefined) ??
       ((rec.message as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined);
-    if (!usage) return;
-    const inp = toNum(usage.input_tokens);
-    const out = toNum(usage.output_tokens);
-    // input is reported once (message_start); output is cumulative in deltas.
-    if (inp !== undefined) attempt.usage.inputTokens = Math.max(attempt.usage.inputTokens, inp);
-    if (out !== undefined) attempt.usage.outputTokens = Math.max(attempt.usage.outputTokens, out);
+    if (!usage || typeof usage !== 'object') return;
+    this.inp = Math.max(this.inp, toNum(usage.input_tokens) ?? 0);
+    this.out = Math.max(this.out, toNum(usage.output_tokens) ?? 0);
+    this.cacheRead = Math.max(this.cacheRead, toNum(usage.cache_read_input_tokens) ?? 0);
+    this.cacheCreate = Math.max(this.cacheCreate, toNum(usage.cache_creation_input_tokens) ?? 0);
+  }
+
+  addTo(u: AttemptUsage): void {
+    if (this.buf) this.line(this.buf);
+    this.buf = '';
+    u.inputTokens += this.inp;
+    u.outputTokens += this.out;
+    u.cacheReadTokens += this.cacheRead;
+    u.cacheCreationTokens += this.cacheCreate;
+    this.inp = this.out = this.cacheRead = this.cacheCreate = 0;
   }
 }
 
 function toNum(v: unknown): number | undefined {
-  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+  // Non-negative safe integers only: a negative, NaN, Infinity or 1e400 count could shrink or poison the meter.
+  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : undefined;
 }
 
 function safeParse(s: string): unknown {

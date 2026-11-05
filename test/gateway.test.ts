@@ -3,6 +3,7 @@ import http from 'node:http';
 import net from 'node:net';
 import {
   Gateway,
+  totalTokens,
   type Dispatch,
   type UpstreamRequest,
   type UpstreamResponse,
@@ -197,6 +198,59 @@ describe('gateway: streaming, retries, tool use', () => {
     const second = await request(g, { path: '/v1/messages', token: sessionToken, body: '{}' });
     expect(second.status).toBe(200);
     expect(up.seen.length).toBe(2);
+  });
+});
+
+describe('gateway: usage meter sums every response of an attempt', () => {
+  it('sums buffered responses (not the max), with cache tokens', async () => {
+    let n = 0;
+    const up = fakeUpstream(() => ({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(JSON.stringify({ usage: { input_tokens: 10 + n, output_tokens: 3, cache_read_input_tokens: 100, cache_creation_input_tokens: n++ === 0 ? 50 : 0 } })) }));
+    const g = await startGateway(up.dispatch);
+    const { sessionToken, attemptId } = g.registerAttempt();
+    for (let i = 0; i < 3; i++) expect((await request(g, { path: '/v1/messages', token: sessionToken, body: '{}' })).status).toBe(200);
+    expect(g.usage(attemptId)).toMatchObject({ requests: 3, inputTokens: 33, outputTokens: 9, cacheReadTokens: 300, cacheCreationTokens: 50 });
+    expect(totalTokens(g.usage(attemptId)!)).toBe(392);
+  });
+
+  it('meters SSE data lines split across chunks, and sums two streams', async () => {
+    const events = [
+      { type: 'message_start', message: { usage: { input_tokens: 11, output_tokens: 1, cache_read_input_tokens: 7 } } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 23 } },
+    ];
+    const text = events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join('');
+    const bytes = Buffer.from(text);
+    const up = fakeUpstream(() => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      stream: (async function* () {
+        for (let i = 0; i < bytes.length; i += 5) yield bytes.subarray(i, i + 5); // every line split
+      })(),
+    }));
+    const g = await startGateway(up.dispatch);
+    const { sessionToken, attemptId } = g.registerAttempt();
+    await request(g, { path: '/v1/messages', token: sessionToken, body: '{"stream":true}' });
+    await request(g, { path: '/v1/messages', token: sessionToken, body: '{"stream":true}' });
+    expect(g.usage(attemptId)).toMatchObject({ requests: 2, inputTokens: 22, outputTokens: 46, cacheReadTokens: 14 });
+  });
+
+  it('ignores hostile usage numbers', async () => {
+    const bodies = ['{"usage":{"input_tokens":-1000,"output_tokens":5}}', '{"usage":{"input_tokens":1e400,"output_tokens":"9"}}', '{"usage":{"input_tokens":1.5,"output_tokens":null}}', '{"usage":[1,2]}'];
+    let i = 0;
+    const up = fakeUpstream(() => ({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(bodies[i++] ?? '{}') }));
+    const g = await startGateway(up.dispatch);
+    const { sessionToken, attemptId } = g.registerAttempt();
+    for (let k = 0; k < bodies.length; k++) await request(g, { path: '/v1/messages', token: sessionToken, body: '{}' });
+    expect(g.usage(attemptId)).toMatchObject({ inputTokens: 0, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0 });
+  });
+
+  it('the token budget counts summed and cached tokens', async () => {
+    const up = fakeUpstream(() => ({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from('{"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":40}}') }));
+    const g = await startGateway(up.dispatch);
+    const { sessionToken } = g.registerAttempt({ maxTokens: 100 });
+    expect((await request(g, { path: '/v1/messages', token: sessionToken, body: '{}' })).status).toBe(200);
+    expect((await request(g, { path: '/v1/messages', token: sessionToken, body: '{}' })).status).toBe(200);
+    expect((await request(g, { path: '/v1/messages', token: sessionToken, body: '{}' })).status).toBe(200);
+    expect((await request(g, { path: '/v1/messages', token: sessionToken, body: '{}' })).status).toBe(429);
   });
 });
 
