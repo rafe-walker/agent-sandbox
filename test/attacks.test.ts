@@ -90,7 +90,7 @@ describe('no spawn site inherits the harness env (no caps needed)', () => {
     walk(root);
     const offenders = files.filter((f) => {
       const src = readFileSync(f, 'utf8');
-      return /from 'node:child_process'/.test(src) && !/MINIMAL_ENV/.test(src);
+      return /from 'node:child_process'|import\('node:child_process'\)/.test(src) && !/MINIMAL_ENV/.test(src);
     });
     expect(offenders.map((f) => path.relative(root, f))).toEqual([]);
   });

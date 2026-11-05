@@ -19,7 +19,7 @@ function usage(): void {
       '  agent-sandbox preflight [--profile <dev|linux-sandbox>] [--json]',
       '                                 Probe capabilities + run the attacker suite',
       '  agent-sandbox run [--profile linux-sandbox|dev] [--source <dir>] [--wall-ms <n>]',
-      '                    [--gateway-port <p>] [--env K=V ...] -- <cmd...>',
+      '                    [--gateway-port <p>] [--env K=V ...] [--inherit-env (dev only)] -- <cmd...>',
       '                                 Launch a command inside the sandbox',
       '  agent-sandbox gateway --listen <host:port> [--max-requests n] [--max-tokens n]',
       '                    [--max-wall-ms n] [--ca <bundle>]',
@@ -160,9 +160,18 @@ async function cmdRun(argv: string[]): Promise<number> {
       'WARNING: profile "dev" runs the command with NO isolation. Never publishable.\n',
     );
     const { spawnSync } = await import('node:child_process');
+    const { MINIMAL_ENV } = await import('./launcher.js');
+    // Even in dev, the harness env (credentials) is NOT passed unless asked.
+    const base: Record<string, string> = opts.includes('--inherit-env')
+      ? Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined))
+      : {
+          ...MINIMAL_ENV,
+          ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
+          ...(process.env.TERM ? { TERM: process.env.TERM } : {}),
+        };
     const r = spawnSync(command[0]!, command.slice(1), {
       stdio: 'inherit',
-      env: { ...process.env, ...env },
+      env: { ...base, ...env },
       ...(wallClockMs !== undefined ? { timeout: wallClockMs } : {}),
     });
     return r.status ?? 1;
@@ -189,7 +198,7 @@ async function cmdRun(argv: string[]): Promise<number> {
       env,
       ...(source ? { sourceDir: source } : {}),
       ...(wallClockMs !== undefined ? { wallClockMs } : {}),
-      ...(handle ? { netns: handle.netns } : {}),
+      ...(handle ? { netns: handle.netns, gatewayIp: handle.hostIp } : {}),
     });
     if (r.timedOut) process.stderr.write('wall-clock limit reached; sandbox killed\n');
     if (r.survivors !== 0) process.stderr.write(`WARNING: ${r.survivors} process(es) survived teardown\n`);
