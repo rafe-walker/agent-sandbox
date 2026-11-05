@@ -60,4 +60,19 @@ export {
   type SetupOptions,
 } from './net.js';
 export { netEnforcedProbe, canEnforceNet } from './net-probes.js';
+export { buildRedactor, REDACTION_MARKER, type Redactor } from './redact.js';
+export {
+  Gateway,
+  gatewayFromEnv,
+  makeProxyDispatch,
+  DEFAULT_UPSTREAM,
+  DEFAULT_ALLOWED_PATHS,
+  DEFAULT_BUDGET,
+  type GatewayConfig,
+  type AttemptBudget,
+  type AttemptUsage,
+  type Dispatch,
+  type UpstreamRequest,
+  type UpstreamResponse,
+} from './gateway.js';
 export { assembleCapabilityProbes, type AssembleOptions } from './probes.js';
