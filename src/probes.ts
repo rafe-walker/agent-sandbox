@@ -5,6 +5,7 @@
  */
 import type { CapabilityProbe } from './preflight.js';
 import { launcherProbes, canLaunch } from './launcher-probes.js';
+import { netEnforcedProbe, canEnforceNet } from './net-probes.js';
 
 export interface AssembleOptions {
   sourceDir?: string;
@@ -13,7 +14,8 @@ export interface AssembleOptions {
 export function assembleCapabilityProbes(opts: AssembleOptions = {}): CapabilityProbe[] {
   const probes: CapabilityProbe[] = [];
   if (canLaunch()) probes.push(...launcherProbes(opts.sourceDir));
-  // network (net_enforced) and collector (evidence_writer_separated) probes
-  // are registered by their modules in the following stacked PRs.
+  if (canEnforceNet()) probes.push(netEnforcedProbe());
+  // The collector (evidence_writer_separated) probe is registered by its
+  // module in the following stacked PR.
   return probes;
 }
