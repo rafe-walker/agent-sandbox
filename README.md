@@ -53,6 +53,8 @@ preflight attacker suite passed on this host. There is no silent downgrade.
 
 ```
 agent-sandbox preflight [--profile linux-sandbox|dev] [--source <dir>] [--json]
+                        [--sign --out <file> [--key-dir <d>] [--ttl-ms n]]
+agent-sandbox pubkey [--key-dir <d>]
 agent-sandbox run [--profile ...] [--source <dir>] [--wall-ms n] [--gateway-port p] [--env K=V ...] -- <cmd...>
 agent-sandbox gateway --listen <host:port> [--max-requests n] [--max-tokens n] [--max-wall-ms n] [--ca <bundle>]
 agent-sandbox collector --run-dir <d> --attempt <id> [--worker-uid <uid>]
@@ -61,7 +63,13 @@ agent-sandbox cleanup          # remove asbx_ uids/netns/nft/veth left by a cras
 sandbox-submit --kind <k> [--data <json>]   # inside the sandbox
 ```
 
-`preflight` exits 0 only when the run is publishable. The library API and a
+`preflight` exits 0 only when the run is publishable. With `--sign` (root),
+it also writes an Ed25519-signed report that consumers check with
+`verifyPreflight(signed, pubkey)`. The key is per host, its private half
+0600 root under `/var/lib/agent-sandbox/attest/` (never a sandbox-visible
+path), and a signed report is bound to this host and boot, the agent-sandbox
+version and the suite version, and expires after 1 h (cap 6 h). A
+hand-written or edited report fails verification. The library API and a
 full harness composition are in [`docs/API.md`](./docs/API.md).
 
 ## Claude Code compatibility

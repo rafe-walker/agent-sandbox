@@ -1,7 +1,7 @@
 /**
  * agent-sandbox — public library API.
  */
-export { SUITE_VERSION } from './version.js';
+export { SUITE_VERSION, AGENT_SANDBOX_VERSION } from './version.js';
 export {
   PROFILES,
   IMPLEMENTED_PROFILES,
@@ -92,3 +92,22 @@ export {
 export { evidenceWriterProbe, canCollect } from './collector-probes.js';
 export { assembleCapabilityProbes, type AssembleOptions } from './probes.js';
 export { coreAttacks, SUITE_SIZE } from './attacks/index.js';
+export {
+  signPreflight,
+  verifyPreflight,
+  loadOrCreateHostKey,
+  loadHostPublicKey,
+  currentHostId,
+  keyIdOf,
+  SIGNED_PREFLIGHT_SCHEMA,
+  DEFAULT_KEY_DIR,
+  PUBLIC_KEY_FILE,
+  DEFAULT_TTL_MS,
+  MAX_TTL_MS,
+  SANDBOX_VISIBLE_PREFIXES,
+  type SignedPreflight,
+  type PreflightBinding,
+  type HostKey,
+  type VerifyResult,
+  type VerifyOptions,
+} from './attest.js';

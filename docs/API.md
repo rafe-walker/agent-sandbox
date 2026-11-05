@@ -66,6 +66,15 @@ await col.collector.stop(); await gw.stop(); await teardownNetwork(net);
 absent on the host (today: a kernel with no IPv6). The attack must still be
 blocked, and N/A attacks are counted and listed.
 
+## Signed preflight
+
+| Export | Purpose |
+|---|---|
+| `loadOrCreateHostKey({ dir?, forbidUnder? })` | Root only. Per-host Ed25519 key in `DEFAULT_KEY_DIR` (`/var/lib/agent-sandbox/attest`): private 0600, public 0644. Refuses a dir under `SANDBOX_VISIBLE_PREFIXES` or `forbidUnder`, a symlink, a non-root or group/other-writable ancestor, or a loose key file. |
+| `signPreflight(report, key, { ttlMs?, now? })` | Envelope `agent-sandbox/signed-preflight@1`: `{ schema, alg, key_id, payload (base64 of {report, binding}), signature }`. TTL default 1 h, max 6 h. |
+| `verifyPreflight(signed, pubkey, { now?, hostId?, version?, suiteVersion?, maxAgeMs?, requirePublishable? })` | Never throws. `{ ok: true, report, binding, keyId }` only if the signature verifies over the exact payload bytes, the host/version/suite bindings match this process, the window holds, and `publishable` re-derives to true (unless `requirePublishable: false`). |
+| `loadHostPublicKey(dir?)`, `currentHostId()`, `keyIdOf(pub)` | Consumer helpers. |
+
 ## Launcher
 
 | Export | Purpose |
